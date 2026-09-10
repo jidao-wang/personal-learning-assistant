@@ -1,0 +1,10 @@
+.idea/
+.venv/
+venv/
+.env
+__pycache__/
+*.py[cod]
+*.sqlite3
+chroma_db/
+notes/
+.DS_Store
