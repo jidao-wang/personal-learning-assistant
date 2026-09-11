@@ -125,17 +125,28 @@ def health(request: Request) -> dict:
     except ImportError:
         openai_installed = False
 
+    langgraph_installed = False
+    try:
+        import langgraph  # noqa: F401
+
+        langgraph_installed = True
+    except ImportError:
+        langgraph_installed = False
+
     api_key_configured = bool(str(getattr(runtime.settings, "api_key", "") or "").strip())
     warnings: list[str] = []
     if not api_key_configured:
         warnings.append("未配置 DASHSCOPE_API_KEY（请在 .env 中填写）")
     if not openai_installed:
         warnings.append("未安装 openai 包（请执行：pip install openai）")
+    if not langgraph_installed:
+        warnings.append("未安装 langgraph 包（请执行：pip install langgraph）")
     return {
         "status": "OK",
         "openai_installed": openai_installed,
+        "langgraph_installed": langgraph_installed,
         "api_key_configured": api_key_configured,
-        "llm_ready": openai_installed and api_key_configured,
+        "llm_ready": openai_installed and api_key_configured and langgraph_installed,
         "warnings": warnings,
     }
 

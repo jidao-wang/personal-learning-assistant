@@ -144,11 +144,51 @@ def submit_review(
         finalize_review_submission(
             review_session_id, results, total_score, weak_points, db_path
         )
+        detailed_answers = []
+        wrong_items = []
+        for index, (question, result) in enumerate(zip(questions, results), start=1):
+            score = float(result.get("score") or 0.0)
+            qtype = question.get("question_type")
+            if qtype in {"choice", "judgment"}:
+                is_correct = score >= 100.0
+            else:
+                is_correct = score >= 60.0 and result.get("status") not in {
+                    "unanswered",
+                    "grading_failed",
+                }
+            item = {
+                **result,
+                "index": index,
+                "prompt": question.get("prompt", ""),
+                "question_type": qtype,
+                "correct_answer": question.get("correct_answer", ""),
+                "reference_answer": question.get("reference_answer", ""),
+                "knowledge_point": question.get("knowledge_point", ""),
+                "is_correct": is_correct,
+            }
+            detailed_answers.append(item)
+            if not is_correct:
+                wrong_items.append(
+                    {
+                        "index": index,
+                        "question_id": question.get("id"),
+                        "prompt": question.get("prompt", ""),
+                        "question_type": qtype,
+                        "answer_text": result.get("answer_text", ""),
+                        "correct_answer": question.get("correct_answer", ""),
+                        "reference_answer": question.get("reference_answer", ""),
+                        "score": score,
+                        "feedback": result.get("feedback", ""),
+                        "knowledge_point": question.get("knowledge_point", ""),
+                    }
+                )
         return {
             "review_session_id": review_session_id,
             "status": "submitted",
             "total_score": total_score,
-            "answers": results,
+            "answers": detailed_answers,
+            "wrong_count": len(wrong_items),
+            "wrong_items": wrong_items,
         }
     except Exception:
         release_review_submission(review_session_id, db_path)

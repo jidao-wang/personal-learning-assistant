@@ -525,3 +525,32 @@ button.secondary { background: #475569; }
 .file-item > .danger {
   justify-self: end;
 }
+
+
+.question-card.is-correct {
+  border-color: #34d399;
+  background: #ecfdf5;
+}
+
+.question-card.is-wrong {
+  border-color: #f87171;
+  background: #fef2f2;
+}
+
+.grade-detail {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.grade-detail.ok {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+.grade-detail.bad {
+  background: #fee2e2;
+  color: #991b1b;
+}

@@ -34,7 +34,7 @@ FastAPI → LangGraph 单主 Agent → chat/qa/review/plan/statistics；SQLite �
 本项目通过 OpenAI 兼容接口调用 DashScope（通义）。除 `requirements.txt` 一键安装外，请确认：
 
 1. `.env` 中已填写 `DASHSCOPE_API_KEY`
-2. 已安装 `openai` 包：`pip install openai`
+2. 已安装 `openai` 与 `langgraph`：`pip install openai langgraph`
 3. 浏览器打开后若顶部出现黄色提示，按提示补齐依赖后 **重启 uvicorn** 并 **Ctrl+F5**
 
 知识库上传/删除不依赖大模型；聊天资料问答、复习出题、学习计划需要模型可用。

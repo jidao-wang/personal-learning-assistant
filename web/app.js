@@ -492,6 +492,15 @@ function renderProgress(metrics) {
     </div>`;
 }
 
+function isAnswerCorrect(item) {
+  if (typeof item?.is_correct === "boolean") return item.is_correct;
+  const score = Number(item?.score || 0);
+  const qtype = item?.question_type || "";
+  if (item?.status === "unanswered" || item?.status === "grading_failed") return false;
+  if (qtype === "choice" || qtype === "judgment") return score >= 100;
+  return score >= 60;
+}
+
 function renderReviewResult(result) {
   if (!result) {
     setStatus(els.reviewResult, "");
@@ -502,11 +511,72 @@ function renderReviewResult(result) {
     return;
   }
   const answers = result.answers || [];
+  const answerMap = Object.fromEntries(
+    answers.map((item) => [item.question_id, item])
+  );
+  const wrongItems =
+    result.wrong_items ||
+    answers.filter((item) => !isAnswerCorrect(item));
   const failed = answers.filter((item) => item.status === "grading_failed").length;
-  const summary = `总分 ${result.total_score ?? "-"} · 状态 ${result.status || "submitted"} · ${
-    answers.length
-  } 题${failed ? ` · ${failed} 道简答评分失败` : ""}`;
+
+  // Mark each question card with correct/wrong detail.
+  els.reviewForm.querySelectorAll(".question-card").forEach((card, index) => {
+    const questionId = card.dataset.questionId;
+    const detail = answerMap[questionId];
+    card.classList.remove("is-correct", "is-wrong");
+    const old = card.querySelector(".grade-detail");
+    if (old) old.remove();
+    if (!detail) return;
+
+    const correct = isAnswerCorrect(detail);
+    card.classList.add(correct ? "is-correct" : "is-wrong");
+    // lock inputs after submit
+    card.querySelectorAll("input, textarea").forEach((node) => {
+      node.disabled = true;
+    });
+
+    const box = document.createElement("div");
+    box.className = `grade-detail ${correct ? "ok" : "bad"}`;
+    const lines = [
+      correct ? "回答正确" : "回答错误",
+      `得分 ${detail.score ?? 0}`,
+    ];
+    if (!correct) {
+      if (detail.answer_text) lines.push(`你的答案：${detail.answer_text}`);
+      else lines.push("你的答案：未作答");
+      if (detail.correct_answer) lines.push(`正确答案：${detail.correct_answer}`);
+      if (detail.reference_answer && detail.reference_answer !== detail.correct_answer) {
+        lines.push(`参考：${detail.reference_answer}`);
+      }
+    }
+    if (detail.feedback) lines.push(`评语：${detail.feedback}`);
+    box.innerHTML = lines.map((line) => `<div>${line}</div>`).join("");
+    card.appendChild(box);
+  });
+
+  const wrongText = wrongItems.length
+    ? `错题：第 ${wrongItems
+        .map((item) => item.index || "")
+        .filter(Boolean)
+        .join("、")} 题`
+    : "全部正确";
+  const summary = `总分 ${result.total_score ?? "-"} · ${answers.length} 题 · 错 ${
+    result.wrong_count ?? wrongItems.length
+  } 题 · ${wrongText}${failed ? ` · ${failed} 道简答评分失败` : ""}`;
   setStatus(els.reviewResult, summary);
+
+  if (wrongItems.length) {
+    const detail = wrongItems
+      .map((item, i) => {
+        const no = item.index || i + 1;
+        return `第${no}题：${(item.prompt || "").slice(0, 40)} → 你的答案：${
+          item.answer_text || "未作答"
+        }；正确答案：${item.correct_answer || "-"}`;
+      })
+      .join("\n");
+    // Keep alert short; full detail is on cards.
+    console.info("wrong items", wrongItems);
+  }
 }
 
 async function loadKnowledgeBases() {
@@ -771,11 +841,22 @@ async function submitReview() {
     alert("请先生成或打开复习会话");
     return;
   }
-  await saveReviewDraft();
-  const result = await api(`/api/reviews/${state.reviewSessionId}/submit`, {
-    method: "POST",
-  });
-  renderReviewResult(result);
+  await withBusyButton(
+    els.submitReview,
+    "提交中…",
+    els.reviewResult,
+    "正在评分…",
+    async () => {
+      await saveReviewDraft();
+      const result = await api(`/api/reviews/${state.reviewSessionId}/submit`, {
+        method: "POST",
+      });
+      renderReviewResult(result);
+      if ((result.wrong_count || (result.wrong_items || []).length) > 0) {
+        // mild notice; cards already show details
+      }
+    },
+  );
 }
 
 async function openPlanWorkspace(planId) {
