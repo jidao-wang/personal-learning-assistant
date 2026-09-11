@@ -42,6 +42,10 @@ def _contains_sensitive_value(value: str) -> bool:
     lowered = value.lower()
     if any(word in lowered for word in _SENSITIVE_WORDS):
         return True
+    if re.search(r"(?i)(?<![a-z0-9])sk-[a-z0-9_-]{10,}(?![a-z0-9])", value):
+        return True
+    if re.search(r"(?i)(?<![a-z0-9])bearer\s+[a-z0-9._~-]{8,}(?![a-z0-9])", value):
+        return True
     if re.search(r"(?<!\d)1[3-9]\d{9}(?!\d)", value):
         return True
     if re.search(r"(?<!\d)\d{17}[\dXx](?!\d)", value):
@@ -49,12 +53,16 @@ def _contains_sensitive_value(value: str) -> bool:
     return bool(re.search(r"(?<!\d)\d{12,19}(?!\d)", value))
 
 
+def _contains_sensitive_key(key: str) -> bool:
+    return any(word in key.lower() for word in _SENSITIVE_WORDS)
+
+
 def save_preference(key: str, value: str, db_path=None) -> dict:
     key = str(key).strip()
     value = str(value).strip()
     if not key or not value:
         raise ValidationError("偏好内容不能为空")
-    if _contains_sensitive_value(value):
+    if _contains_sensitive_key(key) or _contains_sensitive_value(value):
         raise ValidationError("出于安全原因，不能保存敏感信息")
     updated_at = _now()
     with _connection(db_path) as conn:

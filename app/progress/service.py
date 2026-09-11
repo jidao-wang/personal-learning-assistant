@@ -18,7 +18,7 @@ def _rows(db_path, knowledge_base_id):
     path = _db_path(db_path)
     init_db(path)
     query = (
-        "SELECT rs.id AS review_session_id, rs.total_score, rq.question_type, "
+        "SELECT rs.id AS review_session_id, rq.question_type, "
         "rq.knowledge_point, rq.correct_answer, ra.answer_text, ra.score "
         "FROM review_sessions rs "
         "JOIN review_questions rq ON rq.review_session_id = rs.id "
@@ -33,6 +33,18 @@ def _rows(db_path, knowledge_base_id):
         return conn.execute(query, params).fetchall()
 
 
+def _submitted_review_count(db_path, knowledge_base_id):
+    path = _db_path(db_path)
+    init_db(path)
+    query = "SELECT COUNT(*) FROM review_sessions WHERE status = 'submitted'"
+    params = []
+    if knowledge_base_id is not None:
+        query += " AND knowledge_base_id = ?"
+        params.append(knowledge_base_id)
+    with get_connection(path) as conn:
+        return conn.execute(query, params).fetchone()[0]
+
+
 def _empty_type_stats():
     return {
         question_type: {"question_count": 0, "accuracy": 0.0, "average_score": 0.0}
@@ -45,11 +57,11 @@ def get_progress(
     db_path=None,
 ) -> dict:
     rows = _rows(db_path, knowledge_base_id)
+    review_count = _submitted_review_count(db_path, knowledge_base_id)
     by_type = defaultdict(list)
     scores = []
     weak_points = []
     seen_weak_points = set()
-    session_ids = set()
     for row in rows:
         raw_score = row["score"]
         if raw_score is not None:
@@ -63,7 +75,6 @@ def get_progress(
         question_type = row["question_type"]
         by_type[question_type].append(score)
         scores.append(score)
-        session_ids.add(row["review_session_id"])
         if score < 60.0 and row["knowledge_point"] and row["knowledge_point"] not in seen_weak_points:
             seen_weak_points.add(row["knowledge_point"])
             weak_points.append(row["knowledge_point"])
@@ -71,7 +82,7 @@ def get_progress(
     question_count = len(scores)
     correct_count = sum(score >= 60.0 for score in scores)
     result = {
-        "review_count": len(session_ids),
+        "review_count": review_count,
         "question_count": question_count,
         "correct_count": correct_count,
         "accuracy": round(correct_count / question_count * 100, 2) if question_count else 0.0,
@@ -79,7 +90,6 @@ def get_progress(
         "wrong_count": question_count - correct_count,
         "weak_points": weak_points,
         "by_question_type": _empty_type_stats(),
-        "draft_review_count": 0,
     }
     for question_type, values in by_type.items():
         if question_type not in result["by_question_type"]:
