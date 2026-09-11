@@ -365,61 +365,7 @@ function renderScopeBox(host, options = {}) {
     }
     host.appendChild(node);
   });
-}) {
-  const selectable = Boolean(options.selectable);
-  const allowUploadJump = Boolean(options.allowUploadJump);
-  host.innerHTML = "";
-  if (!state.knowledgeBaseId) {
-    host.appendChild(
-      emptyState(
-        "请先在左侧「当前知识库」中选择。若还没有库，请到「知识库」页创建并上传。",
-        "去知识库",
-        () => showView("knowledge"),
-      ),
-    );
-    return;
-  }
-  if (!state.files.length) {
-    host.appendChild(
-      emptyState(
-        "当前知识库没有文件。上传 txt/md 后才能按资料出题或制定计划。",
-        allowUploadJump ? "去知识库上传" : null,
-        allowUploadJump ? () => showView("knowledge") : null
-      )
-    );
-    return;
-  }
-  state.files.forEach((file) => {
-    const node = document.createElement("div");
-    node.className = "file-item";
-    const statusClass = file.status === "ready" ? "status-ok" : "status-failed";
-    node.innerHTML = `
-      <div><strong>${file.original_name || file.filename || file.id}</strong></div>
-      <div class="${statusClass}">${file.status || "ready"}${
-      file.error_message ? ` · ${file.error_message}` : ""
-    }</div>`;
-    if (selectable) {
-      const label = document.createElement("label");
-      label.innerHTML = `<input type="checkbox" value="${file.id}" /> 纳入范围`;
-      node.appendChild(label);
-    } else {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "danger";
-      button.textContent = "删除";
-      button.addEventListener("click", async () => {
-        await api(
-          `/api/knowledge-bases/${state.knowledgeBaseId}/files/${file.id}`,
-          { method: "DELETE" }
-        );
-        await refreshFiles();
-      });
-      node.appendChild(button);
-    }
-    host.appendChild(node);
-  });
 }
-
 function renderFiles() {
   renderScopeBox(els.fileList, { selectable: false });
   renderScopeBox(els.reviewFileScope, { selectable: true, allowUploadJump: true });
