@@ -5,15 +5,16 @@ from app.review.generator import generate_questions
 from app.review.grader import grade_choice, grade_judgment, grade_short_answer
 from app.review.schemas import validate_question_counts
 from app.storage.review_store import (
-    _save_review_results,
+    claim_review_submission,
     create_review_session,
+    finalize_review_submission,
     get_review_session,
     list_review_answers,
     list_review_questions,
-    mark_review_submitted,
+    release_review_submission,
     save_review_draft,
-    save_weak_point,
 )
+from app.storage.knowledge_base_store import get_chunk_records
 
 
 REVIEW_QUERY = "请提取当前资料中适合复习的核心概念、易错点和定义"
@@ -48,19 +49,23 @@ def save_draft(review_session_id: str, answers: list[dict], db_path=None) -> lis
     return save_review_draft(review_session_id, answers, db_path)
 
 
-def _short_answer_context(question, session, settings, vector_store):
+def _short_answer_context(question, session, settings, vector_store, db_path):
+    source_ids = list(dict.fromkeys(question.get("source_chunk_ids") or []))
+    if source_ids:
+        results = get_chunk_records(
+            session["knowledge_base_id"], source_ids, db_path
+        )
+        if len(results) != len(source_ids):
+            raise ValueError("题目来源不存在或不属于当前知识库")
+        return results
     scope_file_ids = session["scope"].get("file_ids") or []
-    results = retrieve(
+    return retrieve(
         session["knowledge_base_id"],
         question["prompt"],
         file_ids=scope_file_ids or None,
         settings=settings,
         vector_store=vector_store,
     )
-    source_ids = set(question.get("source_chunk_ids") or [])
-    if source_ids:
-        results = [item for item in results if item.get("chunk_id") in source_ids]
-    return results
 
 
 def submit_review(
@@ -70,81 +75,81 @@ def submit_review(
     db_path=None,
     vector_store=None,
 ) -> dict:
-    session = get_review_session(review_session_id, db_path)
-    if session["status"] == "submitted":
-        raise ValueError("复习已经提交")
-    questions = list_review_questions(review_session_id, db_path)
-    if not questions:
-        raise ValueError("复习题不能为空")
-    draft_answers = {
-        answer["question_id"]: answer
-        for answer in list_review_answers(review_session_id, db_path)
-    }
-    results = []
-    scores = []
-    weak_points = []
-    for question in questions:
-        draft = draft_answers.get(question["id"], {})
-        answer_text = draft.get("answer_text", "")
-        if not answer_text.strip():
-            result = {
-                "answer_text": "",
-                "score": 0.0,
-                "status": "unanswered",
-                "feedback": "未作答",
-                "citations": [],
-            }
-        elif question["question_type"] == "choice":
-            score, feedback = grade_choice(answer_text, question["correct_answer"])
-            result = {
-                "answer_text": answer_text, "score": score,
-                "status": "graded", "feedback": feedback, "citations": [],
-            }
-        elif question["question_type"] == "judgment":
-            score, feedback = grade_judgment(answer_text, question["correct_answer"])
-            result = {
-                "answer_text": answer_text, "score": score,
-                "status": "graded", "feedback": feedback, "citations": [],
-            }
-        elif question["question_type"] == "short_answer":
-            try:
-                context_results = _short_answer_context(question, session, settings, vector_store)
-                result = grade_short_answer(
-                    question,
-                    answer_text,
-                    format_context(context_results),
-                    llm_client,
-                    supplied_citations=format_citations(context_results),
-                )
-            except Exception as exc:
+    if not claim_review_submission(review_session_id, db_path):
+        status = get_review_session(review_session_id, db_path)["status"]
+        if status == "submitted":
+            raise ValueError("复习已经提交")
+        if status == "submitting":
+            raise ValueError("复习正在提交，请勿重复提交")
+        raise ValueError("复习无法提交")
+    try:
+        session = get_review_session(review_session_id, db_path)
+        questions = list_review_questions(review_session_id, db_path)
+        if not questions:
+            raise ValueError("复习题不能为空")
+        draft_answers = {
+            answer["question_id"]: answer
+            for answer in list_review_answers(review_session_id, db_path)
+        }
+        results = []
+        scores = []
+        weak_points = []
+        for question in questions:
+            draft = draft_answers.get(question["id"], {})
+            answer_text = draft.get("answer_text", "")
+            if not answer_text.strip():
                 result = {
-                    "answer_text": answer_text, "score": 0.0,
-                    "status": "grading_failed", "feedback": f"评分失败：{exc}", "citations": [],
+                    "answer_text": "", "score": 0.0, "status": "unanswered",
+                    "feedback": "未作答", "citations": [],
                 }
-        else:
-            raise ValueError("题型不受支持")
-        result["question_id"] = question["id"]
-        scores.append(float(result["score"]))
-        if result["score"] < 60.0 or (
-            question["question_type"] in {"choice", "judgment"} and result["score"] < 100.0
-        ):
-            if question.get("knowledge_point"):
-                weak_points.append(question)
-        results.append(result)
+            elif question["question_type"] == "choice":
+                score, feedback = grade_choice(answer_text, question["correct_answer"])
+                result = {
+                    "answer_text": answer_text, "score": score,
+                    "status": "graded", "feedback": feedback, "citations": [],
+                }
+            elif question["question_type"] == "judgment":
+                score, feedback = grade_judgment(answer_text, question["correct_answer"])
+                result = {
+                    "answer_text": answer_text, "score": score,
+                    "status": "graded", "feedback": feedback, "citations": [],
+                }
+            elif question["question_type"] == "short_answer":
+                try:
+                    context_results = _short_answer_context(
+                        question, session, settings, vector_store, db_path
+                    )
+                    result = grade_short_answer(
+                        question, answer_text, format_context(context_results), llm_client,
+                        supplied_citations=format_citations(context_results),
+                    )
+                except Exception as exc:
+                    result = {
+                        "answer_text": answer_text, "score": 0.0,
+                        "status": "grading_failed", "feedback": f"评分失败：{exc}",
+                        "citations": [],
+                    }
+            else:
+                raise ValueError("题型不受支持")
+            result["question_id"] = question["id"]
+            scores.append(float(result["score"]))
+            if result["score"] < 60.0 or (
+                question["question_type"] in {"choice", "judgment"} and result["score"] < 100.0
+            ):
+                if question.get("knowledge_point"):
+                    weak_points.append(question)
+            results.append(result)
 
-    total_score = round(sum(scores) / len(questions), 2)
-    _save_review_results(review_session_id, results, db_path)
-    for question in weak_points:
-        save_weak_point(
-            session["knowledge_base_id"],
-            question["knowledge_point"],
-            question.get("source_chunk_ids", []),
-            db_path,
+        total_score = round(sum(scores) / len(questions), 2)
+        finalize_review_submission(
+            review_session_id, results, total_score, weak_points, db_path
         )
-    mark_review_submitted(review_session_id, total_score, db_path)
-    return {
-        "review_session_id": review_session_id,
-        "status": "submitted",
-        "total_score": total_score,
-        "answers": results,
-    }
+        return {
+            "review_session_id": review_session_id,
+            "status": "submitted",
+            "total_score": total_score,
+            "answers": results,
+        }
+    except Exception:
+        release_review_submission(review_session_id, db_path)
+        raise

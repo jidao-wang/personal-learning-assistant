@@ -9,15 +9,35 @@ QuestionType = Literal["choice", "judgment", "short_answer"]
 
 def _validate_question_fields(value: dict) -> None:
     question_type = value.get("question_type")
+    rubric = value.get("rubric")
+    if question_type == "short_answer" and (
+        not isinstance(rubric, str) or not rubric.strip()
+    ):
+        raise ValueError("简答题评分标准不能为空")
+    for field_name in ("correct_answer", "reference_answer", "rubric", "knowledge_point"):
+        if not isinstance(value.get(field_name), str):
+            raise ValueError(f"{field_name} 必须是字符串")
+    if not isinstance(value.get("source_chunk_ids"), list):
+        raise ValueError("来源必须是列表")
     if question_type == "choice":
         options = value.get("options") or []
         if len(options) != 4:
             raise ValueError("选择题必须包含恰好四个选项")
+        labels = [
+            option.get("label") if isinstance(option, dict) else getattr(option, "label", None)
+            for option in options
+        ]
+        if len(set(labels)) != 4 or set(labels) != {"A", "B", "C", "D"}:
+            raise ValueError("选择题选项标签必须唯一且严格为 A、B、C、D")
+        correct_answer = value.get("correct_answer")
+        if not isinstance(correct_answer, str) or correct_answer.strip() not in set(labels):
+            raise ValueError("选择题正确答案必须属于选项标签")
     elif question_type == "judgment":
-        if value.get("correct_answer", "").strip() not in {"正确", "错误"}:
+        correct_answer = value.get("correct_answer", "")
+        if not isinstance(correct_answer, str) or correct_answer.strip() not in {"正确", "错误"}:
             raise ValueError("判断题正确答案必须为正确或错误")
     elif question_type == "short_answer":
-        if not str(value.get("rubric", "")).strip():
+        if not isinstance(rubric, str) or not rubric.strip():
             raise ValueError("简答题评分标准不能为空")
 
 
@@ -51,6 +71,8 @@ except ImportError:  # Keep deterministic review tests usable without pydantic.
                 raise ValueError("题型不受支持")
             if not isinstance(self.prompt, str) or not 1 <= len(self.prompt) <= 2000:
                 raise ValueError("题目内容长度必须在 1 到 2000 个字符之间")
+            if not isinstance(self.options, list):
+                raise ValueError("选项必须是列表")
             self.options = [
                 option if isinstance(option, GeneratedOption) else GeneratedOption(**option)
                 for option in self.options

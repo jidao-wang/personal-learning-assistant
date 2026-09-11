@@ -70,6 +70,10 @@ def create_review_session(knowledge_base_id, scope, questions, db_path=None):
         "submitted_at": None,
     }
     with _connection(db_path) as conn:
+        if conn.execute(
+            "SELECT 1 FROM knowledge_bases WHERE id = ?", (knowledge_base_id,)
+        ).fetchone() is None:
+            raise NotFoundError("知识库不存在")
         try:
             conn.execute(
                 "INSERT INTO review_sessions "
@@ -81,23 +85,27 @@ def create_review_session(knowledge_base_id, scope, questions, db_path=None):
                     session["created_at"], None,
                 ),
             )
-            for position, question in enumerate(questions):
-                conn.execute(
-                    "INSERT INTO review_questions "
-                    "(id, review_session_id, position, question_type, prompt, options_json, "
-                    "correct_answer, reference_answer, rubric, knowledge_point, source_chunk_ids_json) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        str(uuid4()), session["id"], position,
-                        question["question_type"], question["prompt"],
-                        json.dumps(question.get("options", []), ensure_ascii=False),
-                        question["correct_answer"], question["reference_answer"],
-                        question["rubric"], question.get("knowledge_point", ""),
-                        json.dumps(question.get("source_chunk_ids", []), ensure_ascii=False),
-                    ),
-                )
         except sqlite3.IntegrityError as exc:
-            raise NotFoundError("知识库不存在") from exc
+            if conn.execute(
+                "SELECT 1 FROM knowledge_bases WHERE id = ?", (knowledge_base_id,)
+            ).fetchone() is None:
+                raise NotFoundError("知识库不存在") from exc
+            raise
+        for position, question in enumerate(questions):
+            conn.execute(
+                "INSERT INTO review_questions "
+                "(id, review_session_id, position, question_type, prompt, options_json, "
+                "correct_answer, reference_answer, rubric, knowledge_point, source_chunk_ids_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    str(uuid4()), session["id"], position,
+                    question["question_type"], question["prompt"],
+                    json.dumps(question.get("options", []), ensure_ascii=False),
+                    question["correct_answer"], question["reference_answer"],
+                    question["rubric"], question.get("knowledge_point", ""),
+                    json.dumps(question.get("source_chunk_ids", []), ensure_ascii=False),
+                ),
+            )
         conn.commit()
     return {**session, "questions": list_review_questions(session["id"], db_path)}
 
@@ -197,37 +205,144 @@ def mark_review_submitted(review_session_id, total_score, db_path=None):
         conn.commit()
 
 
-def save_weak_point(knowledge_base_id, knowledge_point, source_chunk_ids, db_path=None):
+def claim_review_submission(review_session_id, db_path=None) -> bool:
+    with _connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT id FROM review_sessions WHERE id = ?", (review_session_id,)
+        ).fetchone()
+        if row is None:
+            raise NotFoundError("复习记录不存在")
+        cursor = conn.execute(
+            "UPDATE review_sessions SET status='submitting' "
+            "WHERE id=? AND status='draft'",
+            (review_session_id,),
+        )
+        conn.commit()
+    return cursor.rowcount == 1
+
+
+def release_review_submission(review_session_id, db_path=None) -> bool:
+    with _connection(db_path) as conn:
+        cursor = conn.execute(
+            "UPDATE review_sessions SET status='draft', total_score=NULL, submitted_at=NULL "
+            "WHERE id=? AND status='submitting'",
+            (review_session_id,),
+        )
+        if cursor.rowcount:
+            conn.execute(
+                "UPDATE review_answers SET score=NULL, status='draft', feedback='', "
+                "citations_json='[]', submitted_at=NULL WHERE review_session_id=?",
+                (review_session_id,),
+            )
+        conn.commit()
+    return cursor.rowcount == 1
+
+
+def _validate_source_chunk_ids(conn, knowledge_base_id, source_chunk_ids):
+    if conn.execute(
+        "SELECT 1 FROM knowledge_bases WHERE id=?", (knowledge_base_id,)
+    ).fetchone() is None:
+        raise NotFoundError("知识库不存在")
+    for source_chunk_id in source_chunk_ids:
+        row = conn.execute(
+            "SELECT 1 FROM document_chunks WHERE knowledge_base_id=? "
+            "AND (vector_id=? OR id=?) LIMIT 1",
+            (knowledge_base_id, source_chunk_id, source_chunk_id),
+        ).fetchone()
+        if row is None:
+            raise ValueError("来源不存在或不属于该知识库")
+
+
+def _save_weak_point_in_connection(conn, knowledge_base_id, knowledge_point, source_chunk_ids):
     point = str(knowledge_point).strip()
     if not point:
         raise ValueError("知识点不能为空")
     incoming = list(dict.fromkeys(source_chunk_ids or []))
+    _validate_source_chunk_ids(conn, knowledge_base_id, incoming)
     now = _now()
-    with _connection(db_path) as conn:
-        existing = conn.execute(
-            "SELECT * FROM weak_points WHERE knowledge_base_id=? AND knowledge_point=?",
-            (knowledge_base_id, point),
-        ).fetchone()
-        old_ids = _json(existing["source_chunk_ids_json"], []) if existing else []
-        merged_ids = list(dict.fromkeys(old_ids + incoming))
-        if existing:
-            conn.execute(
-                "UPDATE weak_points SET occurrence_count=occurrence_count+1, last_seen=?, source_chunk_ids_json=? "
-                "WHERE knowledge_base_id=? AND knowledge_point=?",
-                (now, json.dumps(merged_ids, ensure_ascii=False), knowledge_base_id, point),
-            )
-        else:
-            conn.execute(
-                "INSERT INTO weak_points "
-                "(id, knowledge_base_id, knowledge_point, occurrence_count, last_seen, source_chunk_ids_json) "
-                "VALUES (?, ?, ?, 1, ?, ?)",
-                (str(uuid4()), knowledge_base_id, point, now, json.dumps(merged_ids, ensure_ascii=False)),
-            )
-        row = conn.execute(
-            "SELECT * FROM weak_points WHERE knowledge_base_id=? AND knowledge_point=?",
-            (knowledge_base_id, point),
-        ).fetchone()
-        conn.commit()
+    existing = conn.execute(
+        "SELECT * FROM weak_points WHERE knowledge_base_id=? AND knowledge_point=?",
+        (knowledge_base_id, point),
+    ).fetchone()
+    old_ids = _json(existing["source_chunk_ids_json"], []) if existing else []
+    merged_ids = list(dict.fromkeys(old_ids + incoming))
+    if existing:
+        conn.execute(
+            "UPDATE weak_points SET occurrence_count=occurrence_count+1, last_seen=?, source_chunk_ids_json=? "
+            "WHERE knowledge_base_id=? AND knowledge_point=?",
+            (now, json.dumps(merged_ids, ensure_ascii=False), knowledge_base_id, point),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO weak_points "
+            "(id, knowledge_base_id, knowledge_point, occurrence_count, last_seen, source_chunk_ids_json) "
+            "VALUES (?, ?, ?, 1, ?, ?)",
+            (str(uuid4()), knowledge_base_id, point, now, json.dumps(merged_ids, ensure_ascii=False)),
+        )
+    row = conn.execute(
+        "SELECT * FROM weak_points WHERE knowledge_base_id=? AND knowledge_point=?",
+        (knowledge_base_id, point),
+    ).fetchone()
     result = dict(row)
     result["source_chunk_ids"] = _json(result.pop("source_chunk_ids_json"), [])
+    return result
+
+
+def finalize_review_submission(review_session_id, answers, total_score, weak_points, db_path=None):
+    with _connection(db_path) as conn:
+        session = conn.execute(
+            "SELECT knowledge_base_id, status FROM review_sessions WHERE id=?",
+            (review_session_id,),
+        ).fetchone()
+        if session is None:
+            raise NotFoundError("复习记录不存在")
+        if session["status"] != "submitting":
+            raise ValueError("复习已经提交或不在提交状态")
+        question_ids = {
+            row["id"] for row in conn.execute(
+                "SELECT id FROM review_questions WHERE review_session_id=?",
+                (review_session_id,),
+            ).fetchall()
+        }
+        answer_ids = {answer.get("question_id") for answer in answers}
+        if answer_ids != question_ids:
+            raise ValueError("评分结果与复习题不一致")
+        for answer in answers:
+            now = _now()
+            conn.execute(
+                "INSERT INTO review_answers "
+                "(id, review_session_id, question_id, answer_text, score, status, feedback, citations_json, submitted_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(question_id) DO UPDATE SET answer_text=excluded.answer_text, "
+                "score=excluded.score, status=excluded.status, feedback=excluded.feedback, "
+                "citations_json=excluded.citations_json, submitted_at=excluded.submitted_at",
+                (
+                    str(uuid4()), review_session_id, answer["question_id"],
+                    answer.get("answer_text", ""), answer["score"], answer["status"],
+                    answer.get("feedback", ""),
+                    json.dumps(answer.get("citations", []), ensure_ascii=False), now,
+                ),
+            )
+        for weak_point in weak_points:
+            _save_weak_point_in_connection(
+                conn, session["knowledge_base_id"], weak_point["knowledge_point"],
+                weak_point.get("source_chunk_ids", []),
+            )
+        submitted_at = _now()
+        cursor = conn.execute(
+            "UPDATE review_sessions SET status='submitted', total_score=?, submitted_at=? "
+            "WHERE id=? AND status='submitting'",
+            (float(total_score), submitted_at, review_session_id),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("复习已经提交或正在提交")
+        conn.commit()
+
+
+def save_weak_point(knowledge_base_id, knowledge_point, source_chunk_ids, db_path=None):
+    with _connection(db_path) as conn:
+        result = _save_weak_point_in_connection(
+            conn, knowledge_base_id, knowledge_point, source_chunk_ids
+        )
+        conn.commit()
     return result

@@ -170,3 +170,46 @@ def list_chunk_records(file_id: str, db_path: Path | None = None) -> list[dict]:
             (file_id,),
         ).fetchall()
     return [_row(row) for row in rows]
+
+
+def get_chunk_records(
+    knowledge_base_id: str,
+    source_chunk_ids: list[str],
+    db_path: Path | None = None,
+) -> list[dict]:
+    """Read the requested chunks directly, preserving the requested order."""
+    requested = list(dict.fromkeys(source_chunk_ids or []))
+    if not requested:
+        return []
+    placeholders = ", ".join("?" for _ in requested)
+    with _connection(db_path) as conn:
+        rows = conn.execute(
+            "SELECT dc.*, f.original_name AS source "
+            "FROM document_chunks dc LEFT JOIN files f ON f.id = dc.file_id "
+            "WHERE dc.knowledge_base_id = ? "
+            f"AND (dc.vector_id IN ({placeholders}) OR dc.id IN ({placeholders}))",
+            (knowledge_base_id, *requested, *requested),
+        ).fetchall()
+    by_id = {}
+    for row in rows:
+        item = dict(row)
+        by_id[item["vector_id"]] = item
+        by_id[item["id"]] = item
+    results = []
+    for source_chunk_id in requested:
+        item = by_id.get(source_chunk_id)
+        if item is None:
+            continue
+        source = item.get("source") or ""
+        results.append(
+            {
+                "text": item["content"],
+                "source": source,
+                "title": Path(source).stem if source else "",
+                "chunk_id": item["vector_id"],
+                "file_id": item["file_id"],
+                "knowledge_base_id": knowledge_base_id,
+                "score": 1.0,
+            }
+        )
+    return results
