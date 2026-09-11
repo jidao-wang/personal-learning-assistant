@@ -141,19 +141,29 @@ def list_review_answers(review_session_id, db_path=None):
 
 
 def save_review_draft(review_session_id, answers, db_path=None):
-    session = get_review_session(review_session_id, db_path)
-    if session["status"] != "draft":
-        raise ValueError("复习已经提交，不能修改答案")
-    questions = {question["id"] for question in list_review_questions(review_session_id, db_path)}
     if not isinstance(answers, list):
         raise ValueError("答案必须是列表")
-    for answer in answers:
-        if answer.get("question_id") not in questions:
-            raise ValueError("题目不存在")
-        if "answer_text" not in answer:
-            raise ValueError("答案内容不能为空")
     now = _now()
     with _connection(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        session = conn.execute(
+            "SELECT status FROM review_sessions WHERE id = ?", (review_session_id,)
+        ).fetchone()
+        if session is None:
+            raise NotFoundError("复习记录不存在")
+        if session["status"] != "draft":
+            raise ValueError("复习已经提交，不能修改答案")
+        questions = {
+            question["id"] for question in conn.execute(
+                "SELECT id FROM review_questions WHERE review_session_id = ?",
+                (review_session_id,),
+            ).fetchall()
+        }
+        for answer in answers:
+            if answer.get("question_id") not in questions:
+                raise ValueError("题目不存在")
+            if "answer_text" not in answer:
+                raise ValueError("答案内容不能为空")
         for answer in answers:
             conn.execute(
                 "INSERT INTO review_answers "
