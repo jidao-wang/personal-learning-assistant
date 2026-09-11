@@ -77,95 +77,102 @@ function showView(name) {
   });
 }
 
+function setStatus(node, text) {
+  if (!node) return;
+  const value = (text || "").trim();
+  if (!value) {
+    node.hidden = true;
+    node.textContent = "";
+    return;
+  }
+  node.hidden = false;
+  node.textContent = value;
+}
+
 function selectedFileIds(container) {
   return Array.from(container.querySelectorAll('input[type="checkbox"]:checked')).map(
     (input) => input.value
   );
 }
 
+function emptyState(text, actionLabel, onClick) {
+  const wrap = document.createElement("div");
+  wrap.className = "empty-state";
+  wrap.textContent = text;
+  if (actionLabel && onClick) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary";
+    button.textContent = actionLabel;
+    button.addEventListener("click", onClick);
+    wrap.appendChild(document.createElement("br"));
+    wrap.appendChild(button);
+  }
+  return wrap;
+}
+
 function renderMessages(messages) {
   els.chatMessages.innerHTML = "";
-  messages.forEach((message) => {
-    const node = document.createElement("div");
-    node.className = `message ${message.role}`;
-    const meta = document.createElement("div");
-    meta.className = "meta";
-    meta.textContent = `${message.role} · ${message.task_type || "chat"}`;
-    node.appendChild(meta);
-    const body = document.createElement("div");
-    body.textContent = message.content || "";
-    node.appendChild(body);
-    if (message.citations && message.citations.length) {
-      const citations = document.createElement("div");
-      citations.className = "citations";
-      citations.textContent = message.citations
-        .map((item) => `${item.source || "资料"}#${item.chunk_id || ""}`)
-        .join(" · ");
-      node.appendChild(citations);
-    }
-    if (message.workspace_type === "review" && message.workspace_id) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "secondary";
-      button.textContent = "打开复习工作区";
-      button.addEventListener("click", () => openReviewWorkspace(message.workspace_id));
-      node.appendChild(button);
-    }
-    if (message.workspace_type === "plan" && message.workspace_id) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "secondary";
-      button.textContent = "打开学习计划";
-      button.addEventListener("click", () => openPlanWorkspace(message.workspace_id));
-      node.appendChild(button);
-    }
-    els.chatMessages.appendChild(node);
-  });
+  if (!messages.length) {
+    els.chatMessages.appendChild(
+      emptyState("还没有消息。先选择知识库，或直接开始普通聊天。")
+    );
+    return;
+  }
+  messages.forEach((message) => appendMessageNode(message));
   els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
 }
 
-function appendLocalMessage(role, content, extra = {}) {
-  const current = Array.from(els.chatMessages.children).map((node) => ({
-    role: node.classList.contains("assistant") ? "assistant" : "user",
-    content: node.querySelector("div:nth-child(2)")?.textContent || "",
-  }));
-  // Direct DOM append is simpler and avoids reconstructing full history.
+function appendMessageNode(message) {
+  if (els.chatMessages.querySelector(".empty-state")) {
+    els.chatMessages.innerHTML = "";
+  }
   const node = document.createElement("div");
-  node.className = `message ${role}`;
+  node.className = `message ${message.role || "assistant"}`;
   const meta = document.createElement("div");
   meta.className = "meta";
-  meta.textContent = `${role} · ${extra.task_type || "chat"}`;
+  meta.textContent = `${message.role || "assistant"} · ${message.task_type || "chat"}`;
   node.appendChild(meta);
   const body = document.createElement("div");
-  body.textContent = content || "";
+  body.textContent = message.content || message.answer || "";
   node.appendChild(body);
-  if (extra.citations && extra.citations.length) {
+  if (message.citations && message.citations.length) {
     const citations = document.createElement("div");
     citations.className = "citations";
-    citations.textContent = extra.citations
+    citations.textContent = message.citations
       .map((item) => `${item.source || "资料"}#${item.chunk_id || ""}`)
       .join(" · ");
     node.appendChild(citations);
   }
-  if (extra.workspace_type === "review" && extra.workspace_id) {
+  if (message.workspace_type === "review" && message.workspace_id) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "secondary";
     button.textContent = "打开复习工作区";
-    button.addEventListener("click", () => openReviewWorkspace(extra.workspace_id));
+    button.addEventListener("click", () => openReviewWorkspace(message.workspace_id));
     node.appendChild(button);
   }
-  if (extra.workspace_type === "plan" && extra.workspace_id) {
+  if (message.workspace_type === "plan" && message.workspace_id) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "secondary";
     button.textContent = "打开学习计划";
-    button.addEventListener("click", () => openPlanWorkspace(extra.workspace_id));
+    button.addEventListener("click", () => openPlanWorkspace(message.workspace_id));
     node.appendChild(button);
   }
   els.chatMessages.appendChild(node);
   els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
-  return current;
+}
+
+function appendLocalMessage(role, content, extra = {}) {
+  appendMessageNode({
+    role,
+    content,
+    task_type: extra.task_type || "chat",
+    citations: extra.citations || [],
+    workspace_type: extra.workspace_type || "",
+    workspace_id: extra.workspace_id || "",
+  });
 }
 
 function renderKnowledgeBases() {
@@ -180,53 +187,84 @@ function renderKnowledgeBases() {
     )
     .join("");
   els.knowledgeBaseSelect.innerHTML = options;
-  els.progressScope.innerHTML = options;
-  els.knowledgeBaseList.innerHTML = state.knowledgeBases
-    .map(
-      (item) => `
-      <div class="kb-item ${item.id === state.knowledgeBaseId ? "active" : ""}" data-id="${item.id}">
-        <strong>${item.name}</strong>
-        <div class="meta">${item.id}</div>
-      </div>`
-    )
-    .join("");
-  els.knowledgeBaseList.querySelectorAll(".kb-item").forEach((node) => {
-    node.addEventListener("click", () => switchKnowledgeBase(node.dataset.id));
+  els.progressScope.innerHTML =
+    '<option value="">全部知识库</option>' +
+    state.knowledgeBases
+      .map(
+        (item) =>
+          `<option value="${item.id}" ${
+            item.id === state.knowledgeBaseId ? "selected" : ""
+          }>${item.name}</option>`
+      )
+      .join("");
+
+  els.knowledgeBaseList.innerHTML = "";
+  if (!state.knowledgeBases.length) {
+    els.knowledgeBaseList.appendChild(emptyState("还没有知识库，先创建一个。"));
+    return;
+  }
+  state.knowledgeBases.forEach((item) => {
+    const node = document.createElement("div");
+    node.className = `kb-item ${item.id === state.knowledgeBaseId ? "active" : ""}`;
+    node.innerHTML = `<strong>${item.name}</strong><div class="meta">${item.id}</div>`;
+    node.addEventListener("click", () => switchKnowledgeBase(item.id));
+    els.knowledgeBaseList.appendChild(node);
   });
 }
 
-function renderFiles(targetList = els.fileList, selectable = false, container = null) {
-  const host = container || targetList;
-  if (!state.files.length) {
-    host.innerHTML = '<div class="file-item">当前知识库没有文件</div>';
+function renderScopeBox(host, options = {}) {
+  const selectable = Boolean(options.selectable);
+  const allowUploadJump = Boolean(options.allowUploadJump);
+  host.innerHTML = "";
+  if (!state.knowledgeBaseId) {
+    host.appendChild(emptyState("请先在顶部选择一个知识库。"));
     return;
   }
-  host.innerHTML = state.files
-    .map((file) => {
-      const statusClass = file.status === "ready" ? "status-ok" : "status-failed";
-      const checkbox = selectable
-        ? `<label><input type="checkbox" value="${file.id}" /> 纳入范围</label>`
-        : `<button type="button" class="danger" data-delete-file="${file.id}">删除</button>`;
-      return `
-        <div class="file-item">
-          <div><strong>${file.original_name || file.filename || file.id}</strong></div>
-          <div class="${statusClass}">${file.status || "ready"}${
-        file.error_message ? ` · ${file.error_message}` : ""
-      }</div>
-          ${checkbox}
-        </div>`;
-    })
-    .join("");
-  host.querySelectorAll("[data-delete-file]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      if (!state.knowledgeBaseId) return;
-      await api(
-        `/api/knowledge-bases/${state.knowledgeBaseId}/files/${button.dataset.deleteFile}`,
-        { method: "DELETE" }
-      );
-      await refreshFiles();
-    });
+  if (!state.files.length) {
+    host.appendChild(
+      emptyState(
+        "当前知识库没有文件。上传 txt/md 后才能按资料出题或制定计划。",
+        allowUploadJump ? "去知识库上传" : null,
+        allowUploadJump ? () => showView("knowledge") : null
+      )
+    );
+    return;
+  }
+  state.files.forEach((file) => {
+    const node = document.createElement("div");
+    node.className = "file-item";
+    const statusClass = file.status === "ready" ? "status-ok" : "status-failed";
+    node.innerHTML = `
+      <div><strong>${file.original_name || file.filename || file.id}</strong></div>
+      <div class="${statusClass}">${file.status || "ready"}${
+      file.error_message ? ` · ${file.error_message}` : ""
+    }</div>`;
+    if (selectable) {
+      const label = document.createElement("label");
+      label.innerHTML = `<input type="checkbox" value="${file.id}" /> 纳入范围`;
+      node.appendChild(label);
+    } else {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "danger";
+      button.textContent = "删除";
+      button.addEventListener("click", async () => {
+        await api(
+          `/api/knowledge-bases/${state.knowledgeBaseId}/files/${file.id}`,
+          { method: "DELETE" }
+        );
+        await refreshFiles();
+      });
+      node.appendChild(button);
+    }
+    host.appendChild(node);
   });
+}
+
+function renderFiles() {
+  renderScopeBox(els.fileList, { selectable: false });
+  renderScopeBox(els.reviewFileScope, { selectable: true, allowUploadJump: true });
+  renderScopeBox(els.planFileScope, { selectable: true, allowUploadJump: true });
 }
 
 function renderReviewQuestions(questions, answers = []) {
@@ -234,45 +272,52 @@ function renderReviewQuestions(questions, answers = []) {
   const answerMap = Object.fromEntries(
     (answers || []).map((item) => [item.question_id, item])
   );
-  els.reviewForm.innerHTML = state.reviewQuestions
-    .map((question, index) => {
-      const draft = answerMap[question.id]?.answer_text || "";
-      let control = "";
-      if (question.question_type === "choice") {
-        control = (question.options || [])
-          .map(
-            (option) => `
-            <label>
-              <input type="radio" name="q-${question.id}" value="${option.label}" ${
-              draft === option.label ? "checked" : ""
-            } />
-              ${option.label}. ${option.text}
-            </label>`
-          )
-          .join("");
-      } else if (question.question_type === "judgment") {
-        control = ["正确", "错误"]
-          .map(
-            (value) => `
-            <label>
-              <input type="radio" name="q-${question.id}" value="${value}" ${
-              draft === value ? "checked" : ""
-            } />
-              ${value}
-            </label>`
-          )
-          .join("");
-      } else {
-        control = `<textarea name="q-${question.id}" rows="4">${draft}</textarea>`;
-      }
-      return `
-        <div class="question-card" data-question-id="${question.id}">
-          <div><strong>第 ${index + 1} 题 · ${question.question_type}</strong></div>
-          <div>${question.prompt}</div>
-          <div class="row" style="flex-direction:column;align-items:stretch">${control}</div>
-        </div>`;
-    })
-    .join("");
+  els.reviewForm.innerHTML = "";
+  if (!state.reviewQuestions.length) {
+    els.reviewForm.appendChild(
+      emptyState("还没有题目。设置题型后点击“生成复习题”。")
+    );
+    return;
+  }
+  state.reviewQuestions.forEach((question, index) => {
+    const draft = answerMap[question.id]?.answer_text || "";
+    const card = document.createElement("div");
+    card.className = "question-card";
+    card.dataset.questionId = question.id;
+    let control = "";
+    if (question.question_type === "choice") {
+      control = (question.options || [])
+        .map(
+          (option) => `
+          <label>
+            <input type="radio" name="q-${question.id}" value="${option.label}" ${
+            draft === option.label ? "checked" : ""
+          } />
+            ${option.label}. ${option.text}
+          </label>`
+        )
+        .join("");
+    } else if (question.question_type === "judgment") {
+      control = ["正确", "错误"]
+        .map(
+          (value) => `
+          <label>
+            <input type="radio" name="q-${question.id}" value="${value}" ${
+            draft === value ? "checked" : ""
+          } />
+            ${value}
+          </label>`
+        )
+        .join("");
+    } else {
+      control = `<textarea name="q-${question.id}" rows="5">${draft}</textarea>`;
+    }
+    card.innerHTML = `
+      <div><strong>第 ${index + 1} 题 · ${question.question_type}</strong></div>
+      <div>${question.prompt}</div>
+      <div class="stack-list">${control}</div>`;
+    els.reviewForm.appendChild(card);
+  });
 }
 
 function collectReviewAnswers() {
@@ -286,6 +331,77 @@ function collectReviewAnswers() {
     }
     return { question_id: question.id, answer_text: answerText };
   });
+}
+
+function renderProgress(metrics) {
+  const data = metrics || {};
+  const byType = data.by_question_type || {};
+  const weakPoints = data.weak_points || [];
+  const cards = [
+    ["复习次数", data.review_count ?? 0],
+    ["正确率", `${data.accuracy ?? 0}%`],
+    ["平均分", data.average_score ?? 0],
+    ["错题数", data.wrong_count ?? 0],
+  ];
+  const typeOrder = [
+    ["choice", "选择题"],
+    ["judgment", "判断题"],
+    ["short_answer", "简答题"],
+  ];
+  els.progressMetrics.innerHTML = `
+    <div class="metric-grid">
+      ${cards
+        .map(
+          ([label, value]) => `
+        <div class="metric-card">
+          <div class="label">${label}</div>
+          <div class="value">${value}</div>
+        </div>`
+        )
+        .join("")}
+    </div>
+    <div class="panel">
+      <h3>薄弱知识点</h3>
+      <div class="weak-list">
+        ${
+          weakPoints.length
+            ? weakPoints.map((item) => `<span class="weak-chip">${item}</span>`).join("")
+            : '<div class="empty-state">暂无薄弱点，完成复习后会显示在这里。</div>'
+        }
+      </div>
+    </div>
+    <div class="type-grid">
+      ${typeOrder
+        .map(([key, label]) => {
+          const item = byType[key] || {};
+          return `
+            <div class="type-card">
+              <div class="label">${label}</div>
+              <div class="value">${item.question_count ?? 0} 题</div>
+              <div class="meta">正确率 ${item.accuracy ?? 0}% · 平均分 ${
+            item.average_score ?? 0
+          }</div>
+            </div>`;
+        })
+        .join("")}
+    </div>`;
+}
+
+function renderReviewResult(result) {
+  if (!result) {
+    setStatus(els.reviewResult, "");
+    return;
+  }
+  if (typeof result === "string") {
+    setStatus(els.reviewResult, result);
+    return;
+  }
+  const answers = result.answers || [];
+  const failed = answers.filter((item) => item.status === "grading_failed").length;
+  const summary = `总分 ${result.total_score ?? "-"} · 状态 ${result.status || "submitted"} · ${
+    answers.length
+  } 题${failed ? ` · ${failed} 道简答评分失败` : ""}`;
+  setStatus(els.reviewResult, summary);
 }
 
 async function loadKnowledgeBases() {
@@ -346,15 +462,10 @@ async function deleteKnowledgeBase() {
 async function refreshFiles() {
   if (!state.knowledgeBaseId) {
     state.files = [];
-    renderFiles();
-    renderFiles(null, true, els.reviewFileScope);
-    renderFiles(null, true, els.planFileScope);
-    return;
+  } else {
+    state.files = await api(`/api/knowledge-bases/${state.knowledgeBaseId}/files`);
   }
-  state.files = await api(`/api/knowledge-bases/${state.knowledgeBaseId}/files`);
   renderFiles();
-  renderFiles(null, true, els.reviewFileScope);
-  renderFiles(null, true, els.planFileScope);
 }
 
 async function switchKnowledgeBase(knowledgeBaseId) {
@@ -365,7 +476,7 @@ async function switchKnowledgeBase(knowledgeBaseId) {
   });
   state.sessionId = session.id;
   renderKnowledgeBases();
-  els.chatMessages.innerHTML = "";
+  renderMessages([]);
   await refreshFiles();
 }
 
@@ -385,18 +496,18 @@ async function uploadFiles(fileList) {
     method: "POST",
     body: formData,
   });
-  els.fileList.innerHTML = results
-    .map((item) => {
-      const statusClass = item.status === "ready" ? "status-ok" : "status-failed";
-      return `
-        <div class="file-item">
-          <div><strong>${item.filename || item.original_name || "未命名文件"}</strong></div>
-          <div class="${statusClass}">${item.status}${
-        item.error_message ? ` · ${item.error_message}` : ""
-      }</div>
-        </div>`;
-    })
-    .join("");
+  els.fileList.innerHTML = "";
+  results.forEach((item) => {
+    const node = document.createElement("div");
+    node.className = "file-item";
+    const statusClass = item.status === "ready" ? "status-ok" : "status-failed";
+    node.innerHTML = `
+      <div><strong>${item.filename || item.original_name || "未命名文件"}</strong></div>
+      <div class="${statusClass}">${item.status}${
+      item.error_message ? ` · ${item.error_message}` : ""
+    }</div>`;
+    els.fileList.appendChild(node);
+  });
   await refreshFiles();
 }
 
@@ -405,6 +516,7 @@ async function sendChat() {
   if (!message) return;
   appendLocalMessage("user", message);
   els.chatInput.value = "";
+  autoResizeChatInput();
   try {
     const result = await api("/api/chat", {
       method: "POST",
@@ -422,7 +534,7 @@ async function sendChat() {
       await openPlanWorkspace(result.workspace_id);
     } else if (result.workspace_type === "statistics") {
       showView("progress");
-      await loadProgress(result.statistics ? null : undefined, result.statistics);
+      renderProgress(result.statistics || {});
     }
   } catch (error) {
     appendLocalMessage("assistant", error.message || "发送失败");
@@ -434,17 +546,9 @@ async function openReviewWorkspace(reviewSessionId) {
   const review = await api(`/api/reviews/${reviewSessionId}`);
   renderReviewQuestions(review.questions || [], review.answers || []);
   if (review.status === "submitted") {
-    els.reviewResult.textContent = JSON.stringify(
-      {
-        status: review.status,
-        total_score: review.total_score,
-        answers: review.answers,
-      },
-      null,
-      2
-    );
+    renderReviewResult(review);
   } else {
-    els.reviewResult.textContent = "当前复习会话可作答，提交后会锁定。";
+    setStatus(els.reviewResult, "当前复习会话可作答，提交后会锁定。");
   }
   showView("review");
 }
@@ -477,7 +581,7 @@ async function saveReviewDraft() {
     method: "PATCH",
     body: JSON.stringify({ answers: collectReviewAnswers() }),
   });
-  els.reviewResult.textContent = "草稿已保存。";
+  setStatus(els.reviewResult, "草稿已保存。");
 }
 
 async function submitReview() {
@@ -489,14 +593,14 @@ async function submitReview() {
   const result = await api(`/api/reviews/${state.reviewSessionId}/submit`, {
     method: "POST",
   });
-  els.reviewResult.textContent = JSON.stringify(result, null, 2);
+  renderReviewResult(result);
 }
 
 async function openPlanWorkspace(planId) {
   state.planId = planId;
   const plan = await api(`/api/plans/${planId}`);
   els.planContent.value = plan.content || "";
-  els.planStatus.textContent = `已加载计划：${plan.title || plan.id}`;
+  setStatus(els.planStatus, `已加载计划：${plan.title || plan.id}`);
   showView("plan");
 }
 
@@ -518,12 +622,12 @@ async function generatePlan() {
     body: JSON.stringify(payload),
   });
   if (result.status === "needs_input") {
-    els.planStatus.textContent = `请补充：${(result.missing_fields || []).join("、")}`;
+    setStatus(els.planStatus, `请补充：${(result.missing_fields || []).join("、")}`);
     return;
   }
   state.planId = result.plan_id;
   els.planContent.value = result.content || "";
-  els.planStatus.textContent = `计划已生成：${result.plan_id}`;
+  setStatus(els.planStatus, `计划已生成：${result.plan_id}`);
   showView("plan");
 }
 
@@ -541,19 +645,25 @@ async function savePlan() {
     method: "PATCH",
     body: JSON.stringify({ content }),
   });
-  els.planStatus.textContent = `计划已保存：${plan.id}`;
+  setStatus(els.planStatus, `计划已保存：${plan.id}`);
 }
 
 async function loadProgress(forcedStats) {
   if (forcedStats) {
-    els.progressMetrics.textContent = JSON.stringify(forcedStats, null, 2);
+    renderProgress(forcedStats);
     showView("progress");
     return;
   }
   const scope = els.progressScope.value;
   const query = scope ? `?knowledge_base_id=${encodeURIComponent(scope)}` : "";
   const metrics = await api(`/api/progress${query}`);
-  els.progressMetrics.textContent = JSON.stringify(metrics, null, 2);
+  renderProgress(metrics);
+}
+
+function autoResizeChatInput() {
+  const input = els.chatInput;
+  input.style.height = "auto";
+  input.style.height = `${Math.min(input.scrollHeight, 160)}px`;
 }
 
 function bindEvents() {
@@ -563,7 +673,11 @@ function bindEvents() {
       if (button.dataset.view === "progress") {
         await loadProgress();
       }
-      if (button.dataset.view === "knowledge" || button.dataset.view === "review" || button.dataset.view === "plan") {
+      if (
+        button.dataset.view === "knowledge" ||
+        button.dataset.view === "review" ||
+        button.dataset.view === "plan"
+      ) {
         await refreshFiles();
       }
     });
@@ -573,6 +687,7 @@ function bindEvents() {
   });
   els.progressScope.addEventListener("change", () => loadProgress());
   els.sendChat.addEventListener("click", () => sendChat());
+  els.chatInput.addEventListener("input", autoResizeChatInput);
   els.chatInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
@@ -598,8 +713,19 @@ function bindEvents() {
 
 async function init() {
   bindEvents();
+  setStatus(els.planStatus, "");
+  setStatus(els.reviewResult, "");
   await loadKnowledgeBases();
   await switchKnowledgeBase("");
+  renderProgress({
+    review_count: 0,
+    accuracy: 0,
+    average_score: 0,
+    wrong_count: 0,
+    weak_points: [],
+    by_question_type: {},
+  });
+  autoResizeChatInput();
   showView("chat");
 }
 
