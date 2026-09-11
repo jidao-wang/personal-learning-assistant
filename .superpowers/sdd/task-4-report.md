@@ -71,3 +71,24 @@ Final verification:
 - `python -c "from app.agent.graph import build_graph; build_graph()"`: exit code `1`, raising the expected `app.core.errors.ConfigurationError` for missing `langgraph`.
 
 Remaining concern: this environment still lacks `langgraph` and `openai`, so the real LangGraph builder and network model call remain dependency-gated; import safety and offline fake topology/LLM paths are covered.
+
+## Review Gap Fixes: Error Boundary Hardening
+
+- `_safe_qa_error` now uses a whitelist. It returns only the fixed missing-key configuration message or the fixed missing-`openai` message; unknown `AppError` and ordinary exceptions always receive `资料问答暂时不可用，请检查配置或稍后重试。`.
+- `_LazyLLM.chat` now accepts and forwards `*args` and `**kwargs`, preserving the existing `LLMClient.chat` call shape.
+- The offline fake `StateGraph` test now checks the `AgentState` type, exact node/function bindings, exact conditional router, exact route mapping, callable nodes, and END edges.
+- Existing registry replacement coverage remains isolated with `monkeypatch.setitem`.
+
+## Latest Verification
+
+RED:
+
+- `pytest tests/test_agent.py -q`: `5 failed, 29 passed`; failures were the expected unsafe AppError handling, lazy-chat keyword forwarding, and intentionally over-strict topology assertion while the test was being tightened.
+
+GREEN and final commands:
+
+- `pytest tests/test_agent.py -q`: `34 passed in 0.35s`.
+- `pytest tests/test_database.py tests/test_ingest.py tests/test_retrieval.py tests/test_agent.py -q`: final output recorded as `83 passed`.
+- `python -m compileall -q app tests`: exit code `0`.
+
+Remaining concern: `langgraph` and `openai` remain unavailable in this environment, so real LangGraph execution and network model calls are still dependency-gated; import safety and offline behavior remain covered.

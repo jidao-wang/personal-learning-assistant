@@ -274,7 +274,7 @@ def test_qa_app_error_is_returned_without_breaking_node_contract(monkeypatch):
         nodes,
         "answer_question",
         lambda *args, **kwargs: (_ for _ in ()).throw(
-            ConfigurationError("请先配置 DASHSCOPE_API_KEY")
+            ConfigurationError("请先配置 DASHSCOPE_API_KEY: secret")
         ),
     )
 
@@ -289,10 +289,61 @@ def test_qa_app_error_is_returned_without_breaking_node_contract(monkeypatch):
         }
     )
 
-    assert result["answer"] == "请先配置 DASHSCOPE_API_KEY"
+    assert result["answer"] == "请先在 .env 中配置 DASHSCOPE_API_KEY"
     assert result["error"] == result["answer"]
     assert result["workspace_type"] == "knowledge_base"
     assert result["workspace_id"] == "kb-1"
+
+
+@pytest.mark.parametrize(
+    "exception",
+    [
+        ConfigurationError("AppError('/tmp/secret/app.sqlite3')"),
+        ConfigurationError("API_KEY: secret-value"),
+        ConfigurationError("relative/cache.sqlite3 contains private data"),
+        RuntimeError("failed at /tmp/secret/app.sqlite3 with API_KEY: secret-value"),
+    ],
+)
+def test_qa_unknown_errors_use_fixed_safe_message(monkeypatch, exception):
+    from app.agent import nodes
+
+    def fail(*args, **kwargs):
+        raise exception
+
+    monkeypatch.setattr(nodes, "answer_question", fail)
+    result = nodes.qa_node(
+        {
+            "user_input": "资料问题",
+            "knowledge_base_id": "kb-1",
+            "request_options": {},
+            "settings": object(),
+            "llm_client": object(),
+            "path": [],
+        }
+    )
+
+    assert result["answer"] == "资料问答暂时不可用，请检查配置或稍后重试。"
+    assert result["error"] == result["answer"]
+    assert "secret" not in result["answer"]
+    assert "sqlite3" not in result["answer"]
+
+
+def test_lazy_llm_forwards_args_and_kwargs():
+    from app.agent.nodes import _LazyLLM
+
+    calls = []
+
+    class FakeLLM:
+        def chat(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return "回答"
+
+    client = _LazyLLM(lambda: FakeLLM())
+
+    assert client.chat([{"role": "user", "content": "问题"}], temperature=0.0) == "回答"
+    assert calls == [
+        (([{"role": "user", "content": "问题"}],), {"temperature": 0.0})
+    ]
 
 
 def test_qa_unexpected_error_is_safe_and_does_not_leak_local_path(monkeypatch):
@@ -351,6 +402,7 @@ def test_build_graph_registers_all_nodes_and_routes_with_fake_state_graph(monkey
 
     built = graph_module.build_graph()
 
+    assert built.state_type is graph_module.AgentState
     assert {name for name, _ in built.nodes} == {
         "classify_route_node",
         "chat_node",
@@ -360,16 +412,28 @@ def test_build_graph_registers_all_nodes_and_routes_with_fake_state_graph(monkey
         "statistics_node",
         "error_node",
     }
+    expected_nodes = {
+        "classify_route_node": graph_module.classify_route_node,
+        "chat_node": graph_module.chat_node,
+        "qa_node": graph_module.qa_node,
+        "review_node": graph_module.review_node,
+        "plan_node": graph_module.plan_node,
+        "statistics_node": graph_module.statistics_node,
+        "error_node": graph_module.error_node,
+    }
+    assert dict(built.nodes) == expected_nodes
     assert ("START", "classify_route_node") in built.edges
     assert built.conditional[0] == "classify_route_node"
-    assert set(built.conditional[2]) == {
-        "chat_node",
-        "qa_node",
-        "review_node",
-        "plan_node",
-        "statistics_node",
-        "error_node",
+    assert built.conditional[1] is graph_module.route_after_classify
+    assert built.conditional[2] == {
+        "chat_node": "chat_node",
+        "qa_node": "qa_node",
+        "review_node": "review_node",
+        "plan_node": "plan_node",
+        "statistics_node": "statistics_node",
+        "error_node": "error_node",
     }
+    assert all(callable(function) for function in dict(built.nodes).values())
     assert all((name, "END") in built.edges for name in built.conditional[2])
 
 

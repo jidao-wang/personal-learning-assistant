@@ -78,10 +78,10 @@ class _LazyLLM:
         self._factory = factory
         self._client = None
 
-    def chat(self, messages):
+    def chat(self, *args, **kwargs):
         if self._client is None:
             self._client = self._factory()
-        return self._client.chat(messages)
+        return self._client.chat(*args, **kwargs)
 
 
 def _llm(state: AgentState):
@@ -175,9 +175,11 @@ def qa_node(state: AgentState) -> dict[str, Any]:
 
 
 def _safe_qa_error(exc: Exception) -> str:
-    if isinstance(exc, AppError):
+    if isinstance(exc, ConfigurationError):
         message = str(exc)
-        if not re.search(r"api[_-]?key\s*=|[A-Za-z]:\\|/(?:[^/ ]+/)+", message, re.IGNORECASE):
+        if "DASHSCOPE_API_KEY" in message and "配置" in message:
+            return "请先在 .env 中配置 DASHSCOPE_API_KEY"
+        if message == "未安装 openai，无法调用模型":
             return message
     return "资料问答暂时不可用，请检查配置或稍后重试。"
 
