@@ -17,6 +17,11 @@
         <button type="button" class="nav-btn" data-view="plan">学习计划</button>
         <button type="button" class="nav-btn" data-view="progress">学习进度</button>
       </nav>
+      <div class="sidebar-kb">
+        <label for="knowledge-base-select">当前知识库</label>
+        <select id="knowledge-base-select"></select>
+        <p class="sidebar-kb-tip">复习、计划、聊天共用这里选中的库</p>
+      </div>
       <p class="hint">本地单用户工具，只绑定 127.0.0.1</p>
     </aside>
 
@@ -24,10 +29,7 @@
       <section id="chat-view" class="workspace chat-workspace active">
         <header class="workspace-header">
           <h2>聊天</h2>
-          <label class="inline-field">
-            <span>当前知识库</span>
-            <select id="knowledge-base-select"></select>
-          </label>
+          <p id="chat-kb-label" class="header-kb-label">当前知识库：未选择</p>
         </header>
         <div class="chat-stage">
           <div id="chat-messages" class="message-list"></div>
@@ -72,6 +74,7 @@
       <section id="review-view" class="workspace">
         <header class="workspace-header">
           <h2>复习</h2>
+          <p id="review-kb-label" class="header-kb-label">当前知识库：未选择</p>
         </header>
         <div class="panel-grid review-grid">
           <div class="panel">
@@ -101,6 +104,7 @@
       <section id="plan-view" class="workspace">
         <header class="workspace-header">
           <h2>学习计划</h2>
+          <p id="plan-kb-label" class="header-kb-label">当前知识库：未选择</p>
         </header>
         <div class="panel-grid">
           <div class="panel">

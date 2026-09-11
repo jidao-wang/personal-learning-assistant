@@ -47,6 +47,9 @@ const els = {
   planContent: document.getElementById("plan-content"),
   savePlan: document.getElementById("save-plan"),
   planStatus: document.getElementById("plan-status"),
+  chatKbLabel: document.getElementById("chat-kb-label"),
+  reviewKbLabel: document.getElementById("review-kb-label"),
+  planKbLabel: document.getElementById("plan-kb-label"),
   progressScope: document.getElementById("progress-scope"),
   progressMetrics: document.getElementById("progress-metrics"),
 };
@@ -175,6 +178,21 @@ function appendLocalMessage(role, content, extra = {}) {
   });
 }
 
+
+function currentKnowledgeBaseName() {
+  if (!state.knowledgeBaseId) return "未选择";
+  const found = state.knowledgeBases.find((item) => item.id === state.knowledgeBaseId);
+  return found ? found.name : "未选择";
+}
+
+function renderKnowledgeBaseLabels() {
+  const label = "当前知识库：" + currentKnowledgeBaseName();
+  [els.chatKbLabel, els.reviewKbLabel, els.planKbLabel].forEach((node) => {
+    if (node) node.textContent = label;
+  });
+}
+
+
 function renderKnowledgeBases() {
   const options = ['<option value="">无知识库</option>']
     .concat(
@@ -187,6 +205,7 @@ function renderKnowledgeBases() {
     )
     .join("");
   els.knowledgeBaseSelect.innerHTML = options;
+  renderKnowledgeBaseLabels();
   els.progressScope.innerHTML =
     '<option value="">全部知识库</option>' +
     state.knowledgeBases
@@ -219,7 +238,13 @@ function renderScopeBox(host, options = {}) {
   const allowUploadJump = Boolean(options.allowUploadJump);
   host.innerHTML = "";
   if (!state.knowledgeBaseId) {
-    host.appendChild(emptyState("请先在顶部选择一个知识库。"));
+    host.appendChild(
+      emptyState(
+        "请先在左侧「当前知识库」中选择。若还没有库，请到「知识库」页创建并上传。",
+        "去知识库",
+        () => showView("knowledge"),
+      ),
+    );
     return;
   }
   if (!state.files.length) {
@@ -535,6 +560,11 @@ async function refreshFiles() {
 
 async function switchKnowledgeBase(knowledgeBaseId) {
   state.knowledgeBaseId = knowledgeBaseId || null;
+  if (state.knowledgeBaseId) {
+    window.localStorage.setItem("learningAssistant.knowledgeBaseId", state.knowledgeBaseId);
+  } else {
+    window.localStorage.removeItem("learningAssistant.knowledgeBaseId");
+  }
   const session = await api("/api/chat/sessions", {
     method: "POST",
     body: JSON.stringify({ knowledge_base_id: state.knowledgeBaseId }),
@@ -781,7 +811,12 @@ async function init() {
   setStatus(els.planStatus, "");
   setStatus(els.reviewResult, "");
   await loadKnowledgeBases();
-  await switchKnowledgeBase("");
+  const preferredId = window.localStorage.getItem("learningAssistant.knowledgeBaseId") || "";
+  const availableIds = new Set(state.knowledgeBases.map((item) => item.id));
+  const initialId = availableIds.has(preferredId)
+    ? preferredId
+    : (state.knowledgeBases[0] && state.knowledgeBases[0].id) || "";
+  await switchKnowledgeBase(initialId);
   renderProgress({
     review_count: 0,
     accuracy: 0,

@@ -49,6 +49,39 @@ button { cursor: pointer; }
 .nav-btn.active,
 .nav-btn:hover { background: #2c3e50; }
 
+.sidebar-kb {
+  margin-top: 20px;
+  display: grid;
+  gap: 8px;
+}
+
+.sidebar-kb label {
+  font-size: 13px;
+  color: #cbd5e1;
+}
+
+.sidebar-kb select {
+  width: 100%;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #0f172a;
+  color: #f8fafc;
+}
+
+.sidebar-kb-tip {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.header-kb-label {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
 .hint {
   margin-top: 24px;
   color: #cbd5e1;
