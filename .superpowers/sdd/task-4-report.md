@@ -52,3 +52,22 @@ Final verification:
 - Full real LangGraph execution could not be exercised because `langgraph` is not installed in the current environment. Construction failure is deliberate and readable; injected fake-graph execution is covered.
 - Real model chat and retrieval require the existing runtime dependencies and configuration, so tests remain deterministic and offline.
 - The default review/plan/statistics tools intentionally report unavailable until their future modules register concrete implementations.
+
+## Review Gap Fixes
+
+- QA now receives a lazy LLM proxy. Strict empty retrieval can return Task 3's material-insufficient answer without constructing or calling an LLM.
+- Default `generate_review`, `generate_plan`, and `get_progress` tools now raise `AppError`, which `run_tool` exposes as structured `status=error`. The registry remains replaceable.
+- `qa_node` catches both `AppError` and unexpected exceptions, returns `answer`, `error`, `workspace_type`, and `workspace_id`, and replaces unsafe exception details with a generic message.
+- Agent tests explicitly verify `file_ids`, `vector_store`, and retrieval mode forwarding, strict short-circuit behavior, safe QA errors, and the complete graph topology through an offline fake `StateGraph`.
+- Registry replacement tests use `monkeypatch.setitem` so changes are restored after each test.
+
+## Review Fix Verification
+
+- Initial RED run after adding review tests: `6 failed, 22 passed` in `pytest tests/test_agent.py -q`; failures covered lazy LLM creation, placeholder success status, and QA exception handling.
+- `pytest tests/test_agent.py -q`: `29 passed in 0.36s`.
+- `pytest tests/test_database.py tests/test_ingest.py tests/test_retrieval.py tests/test_agent.py -q`: `78 passed in 2.29s`.
+- `python -m compileall -q app tests`: exit code `0`.
+- `python -c "import app.agent; print('agent_import=ok')"`: `agent_import=ok`.
+- `python -c "from app.agent.graph import build_graph; build_graph()"`: exit code `1`, raising the expected `app.core.errors.ConfigurationError` for missing `langgraph`.
+
+Remaining concern: this environment still lacks `langgraph` and `openai`, so the real LangGraph builder and network model call remain dependency-gated; import safety and offline fake topology/LLM paths are covered.

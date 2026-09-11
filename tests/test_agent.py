@@ -138,16 +138,239 @@ def test_qa_uses_answer_service_and_forwards_retrieval_mode(monkeypatch):
     assert str(calls[0][0][2]) == "AnswerPolicy.STRICT"
 
 
-def test_tool_registry_can_be_replaced_by_tests():
-    from app.agent.tools import register_tool, run_tool
+def test_qa_strict_empty_result_does_not_create_llm(monkeypatch):
+    from app.agent import nodes
 
-    register_tool("generate_review", lambda **kwargs: {"count": kwargs["count"]})
+    created = []
 
-    assert run_tool("generate_review", {"count": 5}) == {
+    def llm_factory():
+        created.append(True)
+        return type("FakeLLM", (), {"chat": lambda self, messages: "不应调用"})()
+
+    def fake_answer_question(query, knowledge_base_id, policy, settings, llm_client, **kwargs):
+        assert policy.value == "strict"
+        assert not created
+        return type(
+            "AnswerResult",
+            (),
+            {
+                "answer": "当前知识库中没有找到足够资料，无法只根据资料回答。",
+                "citations": [],
+            },
+        )()
+
+    monkeypatch.setattr(nodes, "answer_question", fake_answer_question)
+    result = nodes.qa_node(
+        {
+            "user_input": "只根据资料回答未知问题",
+            "knowledge_base_id": "kb-1",
+            "request_options": {"retrieval_mode": "strict"},
+            "settings": object(),
+            "llm_factory": llm_factory,
+            "path": [],
+        }
+    )
+
+    assert result["answer"] == "当前知识库中没有找到足够资料，无法只根据资料回答。"
+    assert created == []
+
+
+def test_qa_strict_empty_retrieval_returns_material_insufficient_without_llm():
+    from app.agent import nodes
+
+    class EmptyVectorStore:
+        def similarity_search_with_relevance_scores(self, query, k, filter=None):
+            return []
+
+    created = []
+
+    def llm_factory():
+        created.append(True)
+        raise AssertionError("strict 空结果不应创建 LLM")
+
+    result = nodes.qa_node(
+        {
+            "user_input": "只根据资料回答一个未收录的问题",
+            "knowledge_base_id": "kb-1",
+            "request_options": {"retrieval_mode": "strict"},
+            "settings": type("Settings", (), {"top_k": 3, "score_threshold": 0.3})(),
+            "llm_factory": llm_factory,
+            "vector_store": EmptyVectorStore(),
+            "path": [],
+        }
+    )
+
+    assert result["answer"] == "当前知识库中没有找到足够资料，无法只根据资料回答。"
+    assert result["citations"] == []
+    assert created == []
+
+
+def test_qa_forwards_file_ids_vector_store_and_mode_as_explicit_inputs(monkeypatch):
+    from app.agent import nodes
+
+    vector_store = object()
+    captured = {}
+
+    def fake_answer_question(query, knowledge_base_id, policy, settings, llm_client, **kwargs):
+        captured.update(
+            query=query,
+            knowledge_base_id=knowledge_base_id,
+            policy=policy,
+            settings=settings,
+            llm_client=llm_client,
+            **kwargs,
+        )
+        return type("AnswerResult", (), {"answer": "ok", "citations": []})()
+
+    monkeypatch.setattr(nodes, "answer_question", fake_answer_question)
+    result = nodes.qa_node(
+        {
+            "user_input": "资料问题",
+            "knowledge_base_id": "kb-1",
+            "request_options": {
+                "retrieval_mode": "general",
+                "file_ids": ["file-1", "file-2"],
+            },
+            "settings": object(),
+            "llm_client": object(),
+            "vector_store": vector_store,
+            "path": [],
+        }
+    )
+
+    assert result["answer"] == "ok"
+    assert captured["policy"].value == "general"
+    assert captured["file_ids"] == ["file-1", "file-2"]
+    assert captured["vector_store"] is vector_store
+
+
+@pytest.mark.parametrize("tool_name", ["generate_review", "generate_plan", "get_progress"])
+def test_default_future_tool_is_structured_error(tool_name):
+    from app.agent.tools import run_tool
+
+    result = run_tool(tool_name, {})
+
+    assert result["status"] == "error"
+    assert result["tool_name"] == tool_name
+    assert "接入" in result["error"]
+
+
+def test_tool_registry_can_be_replaced_by_tests(monkeypatch):
+    from app.agent import tools
+
+    monkeypatch.setitem(tools.TOOLS, "generate_review", lambda **kwargs: {"count": kwargs["count"]})
+
+    assert tools.run_tool("generate_review", {"count": 5}) == {
         "status": "success",
         "tool_name": "generate_review",
         "result": {"count": 5},
     }
+
+
+def test_qa_app_error_is_returned_without_breaking_node_contract(monkeypatch):
+    from app.agent import nodes
+
+    monkeypatch.setattr(
+        nodes,
+        "answer_question",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ConfigurationError("请先配置 DASHSCOPE_API_KEY")
+        ),
+    )
+
+    result = nodes.qa_node(
+        {
+            "user_input": "资料问题",
+            "knowledge_base_id": "kb-1",
+            "request_options": {},
+            "settings": object(),
+            "llm_client": object(),
+            "path": [],
+        }
+    )
+
+    assert result["answer"] == "请先配置 DASHSCOPE_API_KEY"
+    assert result["error"] == result["answer"]
+    assert result["workspace_type"] == "knowledge_base"
+    assert result["workspace_id"] == "kb-1"
+
+
+def test_qa_unexpected_error_is_safe_and_does_not_leak_local_path(monkeypatch):
+    from app.agent import nodes
+
+    monkeypatch.setattr(
+        nodes,
+        "answer_question",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("failed at C:\\secret\\app.sqlite3 with api_key=secret")
+        ),
+    )
+
+    result = nodes.qa_node(
+        {
+            "user_input": "资料问题",
+            "knowledge_base_id": "kb-1",
+            "request_options": {},
+            "settings": object(),
+            "llm_client": object(),
+            "path": [],
+        }
+    )
+
+    assert "资料问答暂时不可用" in result["answer"]
+    assert "secret" not in result["answer"]
+    assert "app.sqlite3" not in result["answer"]
+    assert result["error"] == result["answer"]
+
+
+def test_build_graph_registers_all_nodes_and_routes_with_fake_state_graph(monkeypatch):
+    import app.agent.graph as graph_module
+
+    class FakeStateGraph:
+        def __init__(self, state_type):
+            self.state_type = state_type
+            self.nodes = []
+            self.edges = []
+            self.conditional = None
+
+        def add_node(self, name, function):
+            self.nodes.append((name, function))
+
+        def add_edge(self, source, target):
+            self.edges.append((source, target))
+
+        def add_conditional_edges(self, source, router, destinations):
+            self.conditional = (source, router, destinations)
+
+        def compile(self):
+            return self
+
+    monkeypatch.setattr(graph_module, "StateGraph", FakeStateGraph)
+    monkeypatch.setattr(graph_module, "START", "START")
+    monkeypatch.setattr(graph_module, "END", "END")
+
+    built = graph_module.build_graph()
+
+    assert {name for name, _ in built.nodes} == {
+        "classify_route_node",
+        "chat_node",
+        "qa_node",
+        "review_node",
+        "plan_node",
+        "statistics_node",
+        "error_node",
+    }
+    assert ("START", "classify_route_node") in built.edges
+    assert built.conditional[0] == "classify_route_node"
+    assert set(built.conditional[2]) == {
+        "chat_node",
+        "qa_node",
+        "review_node",
+        "plan_node",
+        "statistics_node",
+        "error_node",
+    }
+    assert all((name, "END") in built.edges for name in built.conditional[2])
 
 
 def test_missing_tool_returns_structured_error():

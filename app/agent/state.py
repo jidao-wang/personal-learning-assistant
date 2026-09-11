@@ -22,4 +22,5 @@ class AgentState(TypedDict, total=False):
     path: list[str]
     settings: Any
     llm_client: Any
+    llm_factory: Any
     vector_store: Any

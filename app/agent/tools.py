@@ -1,5 +1,7 @@
 from typing import Any, Callable
 
+from app.core.errors import AppError
+
 
 TOOLS: dict[str, Callable[..., Any]] = {}
 TOOL_METADATA = {
@@ -12,7 +14,7 @@ TOOL_METADATA = {
 
 
 def _unavailable(tool_label: str, **kwargs: Any) -> dict[str, Any]:
-    return {"message": f"{tool_label}工具将在对应功能模块接入后可用。"}
+    raise AppError(f"{tool_label}工具尚未接入，当前无法执行。")
 
 
 def register_tool(name: str, function: Callable[..., Any]) -> None:

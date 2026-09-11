@@ -4,7 +4,7 @@ from typing import Any
 from app.agent.state import AgentState
 from app.agent.tools import run_tool
 from app.core.config import load_settings
-from app.core.errors import AppError
+from app.core.errors import AppError, ConfigurationError
 from app.core.llm_client import LLMClient
 from app.knowledge.answer import AnswerPolicy, answer_question
 
@@ -73,16 +73,31 @@ def route_after_classify(state: AgentState) -> str:
     return f"{task_type}_node"
 
 
+class _LazyLLM:
+    def __init__(self, factory):
+        self._factory = factory
+        self._client = None
+
+    def chat(self, messages):
+        if self._client is None:
+            self._client = self._factory()
+        return self._client.chat(messages)
+
+
 def _llm(state: AgentState):
     client = state.get("llm_client")
     if client is not None:
-        return client
-    settings = state.get("settings") or load_settings()
-    if hasattr(settings, "api_key") and not settings.api_key.strip():
-        from app.core.errors import ConfigurationError
+        return _LazyLLM(lambda: client)
+    if state.get("llm_factory") is not None:
+        return _LazyLLM(state["llm_factory"])
 
-        raise ConfigurationError("请先在 .env 中配置 DASHSCOPE_API_KEY")
-    return LLMClient(settings)
+    def create_client():
+        settings = state.get("settings") or load_settings()
+        if hasattr(settings, "api_key") and not settings.api_key.strip():
+            raise ConfigurationError("请先在 .env 中配置 DASHSCOPE_API_KEY")
+        return LLMClient(settings)
+
+    return _LazyLLM(create_client)
 
 
 def _settings(state: AgentState):
@@ -114,17 +129,40 @@ def chat_node(state: AgentState) -> dict[str, Any]:
 
 def qa_node(state: AgentState) -> dict[str, Any]:
     result = _base_result(state, "qa_node", "qa")
-    options = state.get("request_options", {})
-    policy = AnswerPolicy(options.get("retrieval_mode", state.get("retrieval_mode", "default")))
-    answer = answer_question(
-        state.get("user_input", ""),
-        state.get("knowledge_base_id"),
-        policy,
-        _settings(state),
-        _llm(state),
-        file_ids=options.get("file_ids"),
-        vector_store=state.get("vector_store"),
-    )
+    try:
+        options = state.get("request_options", {})
+        policy = AnswerPolicy(
+            options.get("retrieval_mode", state.get("retrieval_mode", "default"))
+        )
+        answer = answer_question(
+            state.get("user_input", ""),
+            state.get("knowledge_base_id"),
+            policy,
+            _settings(state),
+            _llm(state),
+            file_ids=options.get("file_ids"),
+            vector_store=state.get("vector_store"),
+        )
+    except AppError as exc:
+        message = _safe_qa_error(exc)
+        result.update({"answer": message, "error": message})
+        result.update(
+            {
+                "workspace_type": "knowledge_base",
+                "workspace_id": state.get("knowledge_base_id", ""),
+            }
+        )
+        return result
+    except Exception as exc:
+        message = _safe_qa_error(exc)
+        result.update({"answer": message, "error": message})
+        result.update(
+            {
+                "workspace_type": "knowledge_base",
+                "workspace_id": state.get("knowledge_base_id", ""),
+            }
+        )
+        return result
     result.update(
         {
             "answer": answer.answer,
@@ -134,6 +172,14 @@ def qa_node(state: AgentState) -> dict[str, Any]:
         }
     )
     return result
+
+
+def _safe_qa_error(exc: Exception) -> str:
+    if isinstance(exc, AppError):
+        message = str(exc)
+        if not re.search(r"api[_-]?key\s*=|[A-Za-z]:\\|/(?:[^/ ]+/)+", message, re.IGNORECASE):
+            return message
+    return "资料问答暂时不可用，请检查配置或稍后重试。"
 
 
 def _tool_node(state: AgentState, node_name: str, task_type: str, tool_name: str) -> dict[str, Any]:
