@@ -1,0 +1,193 @@
+import re
+from typing import Any
+
+from app.agent.state import AgentState
+from app.agent.tools import run_tool
+from app.core.config import load_settings
+from app.core.errors import AppError
+from app.core.llm_client import LLMClient
+from app.knowledge.answer import AnswerPolicy, answer_question
+
+
+FORCE_CHAT_MARKERS = ("不要查资料", "只聊天", "不用知识库")
+REVIEW_MARKERS = ("出题", "复习", "测试", "题目")
+PLAN_MARKERS = ("学习计划", "安排", "规划")
+STATISTICS_MARKERS = ("统计", "进度", "正确率", "错题", "薄弱")
+QA_MARKERS = ("只根据资料", "允许使用通用知识", "根据资料", "知识库", "资料")
+QUESTION_MARKERS = ("什么是", "如何", "解释", "区别", "为什么", "怎么")
+
+
+def parse_request_options(user_input: str) -> dict[str, Any]:
+    text = user_input or ""
+    if any(marker in text for marker in FORCE_CHAT_MARKERS):
+        mode = "force_chat"
+    elif "只根据资料" in text:
+        mode = "strict"
+    elif "允许使用通用知识" in text:
+        mode = "general"
+    else:
+        mode = "default"
+    return {"retrieval_mode": mode}
+
+
+def classify_task(user_input: str, knowledge_base_id: str | None) -> str:
+    text = user_input or ""
+    if any(marker in text for marker in FORCE_CHAT_MARKERS):
+        return "chat"
+    if any(marker in text for marker in REVIEW_MARKERS) or re.search(r"出\s*\d*\s*道?\s*题", text):
+        return "review"
+    if any(marker in text for marker in PLAN_MARKERS):
+        return "plan"
+    if any(marker in text for marker in STATISTICS_MARKERS):
+        return "statistics"
+    if any(marker in text for marker in QA_MARKERS):
+        return "qa"
+    if knowledge_base_id and any(marker in text for marker in QUESTION_MARKERS):
+        return "qa"
+    return "chat"
+
+
+def _append_path(state: AgentState, node_name: str) -> list[str]:
+    return [*state.get("path", []), node_name]
+
+
+def classify_route_node(state: AgentState) -> dict[str, Any]:
+    parsed = parse_request_options(state.get("user_input", ""))
+    options = {**parsed, **state.get("request_options", {})}
+    task_type = classify_task(state.get("user_input", ""), state.get("knowledge_base_id"))
+    result: dict[str, Any] = {
+        "request_options": options,
+        "retrieval_mode": options.get("retrieval_mode", "default"),
+        "task_type": task_type,
+        "path": _append_path(state, "classify_route_node"),
+    }
+    if task_type in {"qa", "review", "plan", "statistics"} and not state.get("knowledge_base_id"):
+        result["error"] = "资料问答、复习、学习计划和学习统计需要先选择或创建知识库。"
+    return result
+
+
+def route_after_classify(state: AgentState) -> str:
+    task_type = state.get("task_type", "chat")
+    if task_type in {"qa", "review", "plan", "statistics"} and not state.get("knowledge_base_id"):
+        return "error_node"
+    return f"{task_type}_node"
+
+
+def _llm(state: AgentState):
+    client = state.get("llm_client")
+    if client is not None:
+        return client
+    settings = state.get("settings") or load_settings()
+    if hasattr(settings, "api_key") and not settings.api_key.strip():
+        from app.core.errors import ConfigurationError
+
+        raise ConfigurationError("请先在 .env 中配置 DASHSCOPE_API_KEY")
+    return LLMClient(settings)
+
+
+def _settings(state: AgentState):
+    return state.get("settings") or load_settings()
+
+
+def _base_result(state: AgentState, node_name: str, task_type: str) -> dict[str, Any]:
+    return {
+        "task_type": task_type,
+        "citations": [],
+        "statistics": {},
+        "path": _append_path(state, node_name),
+    }
+
+
+def chat_node(state: AgentState) -> dict[str, Any]:
+    result = _base_result(state, "chat_node", "chat")
+    messages = [{"role": item["role"], "content": item["content"]} for item in state.get("messages", [])]
+    messages.append({"role": "user", "content": state.get("user_input", "")})
+    try:
+        result["answer"] = _llm(state).chat(messages)
+    except AppError as exc:
+        result["answer"] = str(exc)
+    except Exception as exc:
+        result["answer"] = f"聊天服务暂时不可用：{exc}"
+    result.update({"workspace_type": "chat", "workspace_id": state.get("session_id", "")})
+    return result
+
+
+def qa_node(state: AgentState) -> dict[str, Any]:
+    result = _base_result(state, "qa_node", "qa")
+    options = state.get("request_options", {})
+    policy = AnswerPolicy(options.get("retrieval_mode", state.get("retrieval_mode", "default")))
+    answer = answer_question(
+        state.get("user_input", ""),
+        state.get("knowledge_base_id"),
+        policy,
+        _settings(state),
+        _llm(state),
+        file_ids=options.get("file_ids"),
+        vector_store=state.get("vector_store"),
+    )
+    result.update(
+        {
+            "answer": answer.answer,
+            "citations": answer.citations,
+            "workspace_type": "knowledge_base",
+            "workspace_id": state.get("knowledge_base_id", ""),
+        }
+    )
+    return result
+
+
+def _tool_node(state: AgentState, node_name: str, task_type: str, tool_name: str) -> dict[str, Any]:
+    result = _base_result(state, node_name, task_type)
+    tool_result = run_tool(
+        tool_name,
+        {
+            "knowledge_base_id": state.get("knowledge_base_id"),
+            "session_id": state.get("session_id"),
+            "user_input": state.get("user_input", ""),
+            "request_options": state.get("request_options", {}),
+        },
+    )
+    if tool_result["status"] == "success":
+        value = tool_result["result"]
+        if isinstance(value, dict):
+            result.update(value)
+            result.setdefault("answer", value.get("message", ""))
+        else:
+            result["answer"] = str(value)
+    else:
+        result["answer"] = f"{tool_result['error']}"
+        result["error"] = tool_result["error"]
+    result.setdefault("answer", "")
+    result.update(
+        {
+            "task_type": task_type,
+            "workspace_type": "knowledge_base",
+            "workspace_id": state.get("knowledge_base_id", ""),
+        }
+    )
+    return result
+
+
+def review_node(state: AgentState) -> dict[str, Any]:
+    return _tool_node(state, "review_node", "review", "generate_review")
+
+
+def plan_node(state: AgentState) -> dict[str, Any]:
+    return _tool_node(state, "plan_node", "plan", "generate_plan")
+
+
+def statistics_node(state: AgentState) -> dict[str, Any]:
+    return _tool_node(state, "statistics_node", "statistics", "get_progress")
+
+
+def error_node(state: AgentState) -> dict[str, Any]:
+    result = _base_result(state, "error_node", state.get("task_type", "chat"))
+    result.update(
+        {
+            "answer": state.get("error", "当前请求无法处理。"),
+            "error": state.get("error", "当前请求无法处理。"),
+            "workspace_type": "knowledge_base",
+            "workspace_id": state.get("knowledge_base_id") or "",
+        }
+    )
+    return result
