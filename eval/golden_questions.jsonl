@@ -1,0 +1,6 @@
+{"id":"chat-001","mode":"chat","question":"你好","expected_task_type":"chat","requires_citation":false}
+{"id":"qa-001","mode":"qa","question":"根据当前资料解释核心概念","expected_task_type":"qa","requires_citation":true}
+{"id":"qa-002","mode":"strict","question":"只根据资料回答不存在的内容","expected_task_type":"qa","requires_refusal":true}
+{"id":"review-001","mode":"review","question":"生成选择题和简答题","expected_task_type":"review","requires_workspace":true}
+{"id":"plan-001","mode":"plan","question":"制定学习计划","expected_task_type":"plan","requires_workspace":true}
+{"id":"stats-001","mode":"statistics","question":"统计答题情况","expected_task_type":"statistics","requires_statistics":true}

@@ -101,13 +101,33 @@ else:
         options: list[GeneratedOption] = Field(default_factory=list)
         correct_answer: str
         reference_answer: str
-        rubric: str
+        rubric: str | None = None
         knowledge_point: str
         source_chunk_ids: list[str] = Field(default_factory=list)
 
         def __init__(self, **data):
-            super().__init__(**data)
-            _validate_question_fields(self.model_dump() if hasattr(self, "model_dump") else self.dict())
+            try:
+                super().__init__(**data)
+            except Exception as exc:
+                # Keep project-facing Chinese validation errors even when
+                # Pydantic rejects null/blank values before custom checks run.
+                payload = dict(data)
+                for field_name in (
+                    "correct_answer",
+                    "reference_answer",
+                    "rubric",
+                    "knowledge_point",
+                ):
+                    if payload.get(field_name) is None:
+                        payload[field_name] = ""
+                try:
+                    _validate_question_fields(payload)
+                except ValueError:
+                    raise
+                raise ValueError(str(exc)) from exc
+            _validate_question_fields(
+                self.model_dump() if hasattr(self, "model_dump") else self.dict()
+            )
 
 
 def validate_question_counts(

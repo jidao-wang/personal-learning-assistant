@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>个人学习资料问答与复习助手</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <h1>学习助手</h1>
+      <nav class="nav">
+        <button type="button" class="nav-btn active" data-view="chat">聊天</button>
+        <button type="button" class="nav-btn" data-view="knowledge">知识库</button>
+        <button type="button" class="nav-btn" data-view="review">复习</button>
+        <button type="button" class="nav-btn" data-view="plan">学习计划</button>
+        <button type="button" class="nav-btn" data-view="progress">学习进度</button>
+      </nav>
+      <p class="hint">本地单用户工具，只绑定 127.0.0.1</p>
+    </aside>
+
+    <main class="main-content">
+      <section id="chat-view" class="workspace active">
+        <header class="workspace-header">
+          <h2>聊天</h2>
+          <label>
+            当前知识库
+            <select id="knowledge-base-select"></select>
+          </label>
+        </header>
+        <div id="chat-messages" class="message-list"></div>
+        <div class="composer">
+          <textarea id="chat-input" rows="3" placeholder="输入问题，例如：根据当前资料解释 Agent"></textarea>
+          <button type="button" id="send-chat">发送</button>
+        </div>
+      </section>
+
+      <section id="knowledge-view" class="workspace">
+        <header class="workspace-header">
+          <h2>知识库</h2>
+        </header>
+        <div class="panel-grid">
+          <div>
+            <h3>知识库列表</h3>
+            <div class="row">
+              <input id="knowledge-base-name" type="text" placeholder="新知识库名称" />
+              <button type="button" id="create-knowledge-base">创建</button>
+            </div>
+            <div class="row">
+              <input id="rename-knowledge-base-name" type="text" placeholder="重命名为" />
+              <button type="button" id="rename-knowledge-base">重命名</button>
+              <button type="button" id="delete-knowledge-base" class="danger">删除知识库</button>
+            </div>
+            <div id="knowledge-base-list" class="file-list"></div>
+          </div>
+          <div>
+            <h3>当前文件</h3>
+            <div class="row">
+              <input id="file-input" type="file" multiple accept=".txt,.md,text/plain,text/markdown" />
+              <button type="button" id="upload-files">上传</button>
+              <button type="button" id="clear-files" class="danger">清空知识库</button>
+            </div>
+            <div id="file-list" class="file-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="review-view" class="workspace">
+        <header class="workspace-header">
+          <h2>复习</h2>
+        </header>
+        <div class="panel-grid">
+          <div>
+            <h3>出题设置</h3>
+            <div class="row">
+              <label>选择题 <input id="review-choice-count" type="number" min="0" max="50" value="2" /></label>
+              <label>判断题 <input id="review-judgment-count" type="number" min="0" max="50" value="1" /></label>
+              <label>简答题 <input id="review-short-count" type="number" min="0" max="50" value="1" /></label>
+            </div>
+            <div id="review-file-scope" class="file-list"></div>
+            <button type="button" id="create-review">生成复习题</button>
+          </div>
+          <div>
+            <h3>作答区</h3>
+            <form id="review-form" class="question-list"></form>
+            <div class="row">
+              <button type="button" id="save-review-draft">保存草稿</button>
+              <button type="button" id="submit-review">提交答案</button>
+            </div>
+            <div id="review-result" class="result-box"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="plan-view" class="workspace">
+        <header class="workspace-header">
+          <h2>学习计划</h2>
+        </header>
+        <div class="panel-grid">
+          <div>
+            <div class="row">
+              <input id="plan-goal" type="text" placeholder="学习目标" />
+              <input id="plan-deadline" type="text" placeholder="截止日期，例如 2026-10-01" />
+              <input id="plan-daily-minutes" type="number" min="1" max="1440" placeholder="每天分钟数" />
+            </div>
+            <div id="plan-file-scope" class="file-list"></div>
+            <button type="button" id="generate-plan">生成计划</button>
+          </div>
+          <div>
+            <textarea id="plan-content" rows="18" placeholder="生成后的 Markdown 计划可在此编辑"></textarea>
+            <button type="button" id="save-plan">保存计划</button>
+            <div id="plan-status" class="result-box"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="progress-view" class="workspace">
+        <header class="workspace-header">
+          <h2>学习进度</h2>
+          <label>
+            统计范围
+            <select id="progress-scope"></select>
+          </label>
+        </header>
+        <div id="progress-metrics" class="result-box"></div>
+      </section>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

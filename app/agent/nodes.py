@@ -16,6 +16,7 @@ PLAN_MARKERS = ("学习计划", "安排", "规划")
 STATISTICS_MARKERS = ("统计", "进度", "正确率", "错题", "薄弱")
 QA_MARKERS = ("只根据资料", "允许使用通用知识", "根据资料", "知识库", "资料")
 QUESTION_MARKERS = ("什么是", "如何", "解释", "区别", "为什么", "怎么")
+REVIEW_TYPE_MARKERS = ("选择题", "判断题", "简答题")
 
 
 def parse_request_options(user_input: str) -> dict[str, Any]:
@@ -35,7 +36,11 @@ def classify_task(user_input: str, knowledge_base_id: str | None) -> str:
     text = user_input or ""
     if any(marker in text for marker in FORCE_CHAT_MARKERS):
         return "chat"
-    if any(marker in text for marker in REVIEW_MARKERS) or re.search(r"出\s*\d*\s*道?\s*题", text):
+    if (
+        any(marker in text for marker in REVIEW_MARKERS)
+        or any(marker in text for marker in REVIEW_TYPE_MARKERS)
+        or re.search(r"出\s*\d*\s*道?\s*题", text)
+    ):
         return "review"
     if any(marker in text for marker in PLAN_MARKERS):
         return "plan"
@@ -240,7 +245,17 @@ def _tool_node(
 
 
 def review_node(state: AgentState) -> dict[str, Any]:
-    return _tool_node(state, "review_node", "review", "generate_review")
+    result = _tool_node(
+        state,
+        "review_node",
+        "review",
+        "generate_review",
+        workspace_type="review",
+    )
+    value = result.get("_tool_result")
+    if isinstance(value, dict) and value.get("review_session_id"):
+        result["workspace_id"] = value["review_session_id"]
+    return result
 
 
 def plan_node(state: AgentState) -> dict[str, Any]:
