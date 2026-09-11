@@ -1,8 +1,9 @@
 from pathlib import Path
+from hashlib import sha256
 
 import pytest
 
-from app.core.errors import NotFoundError, ValidationError
+from app.core.errors import AppError, NotFoundError, ValidationError
 from app.knowledge.chunking import chunk_text, clean_text
 from app.knowledge.validation import validate_upload
 from tests.conftest import make_test_settings
@@ -77,6 +78,7 @@ class FakeEmbedding:
 class FakeVectorStore:
     def __init__(self):
         self.records = {}
+        self.collection_deleted = False
 
     def upsert(self, ids, documents, metadatas, embeddings):
         for vector_id, document, metadata, embedding in zip(
@@ -91,6 +93,10 @@ class FakeVectorStore:
     def delete(self, ids):
         for vector_id in ids:
             self.records.pop(vector_id, None)
+
+    def delete_collection(self):
+        self.collection_deleted = True
+        self.records.clear()
 
 
 def test_knowledge_base_crud_and_cascade(db_path):
@@ -225,6 +231,42 @@ def test_delete_file_removes_application_copy_records_and_vectors(tmp_path, db_p
     assert not vector_store.records
 
 
+def test_delete_knowledge_base_removes_copies_records_and_vectors(tmp_path, db_path):
+    from app.knowledge.ingest import ingest_file
+    from app.storage.knowledge_base_store import (
+        create_knowledge_base,
+        delete_knowledge_base,
+        get_knowledge_base,
+        list_files,
+    )
+
+    knowledge_base = create_knowledge_base("删除知识库", db_path)
+    settings = make_test_settings(tmp_path, db_path)
+    vector_store = FakeVectorStore()
+    results = [
+        ingest_file(
+            knowledge_base["id"], filename, content.encode("utf-8"), settings,
+            db_path=db_path, embedding_function=FakeEmbedding(), vector_store=vector_store,
+        )
+        for filename, content in [("one.txt", "第一份"), ("two.md", "第二份")]
+    ]
+    stored_paths = [
+        settings.upload_dir / knowledge_base["id"] / f"{result.file_id}.source"
+        for result in results
+    ]
+
+    delete_knowledge_base(
+        knowledge_base["id"], db_path, settings=settings, vector_store=vector_store,
+    )
+
+    with pytest.raises(NotFoundError):
+        get_knowledge_base(knowledge_base["id"], db_path)
+    assert not list_files(knowledge_base["id"], db_path)
+    assert not vector_store.records
+    assert vector_store.collection_deleted
+    assert all(not path.exists() for path in stored_paths)
+
+
 def test_upsert_file_returns_existing_logical_record_on_name_conflict(db_path):
     from app.storage.knowledge_base_store import create_knowledge_base, upsert_file
 
@@ -267,6 +309,86 @@ def test_embedding_failure_does_not_replace_previous_version(tmp_path, db_path):
     assert failed.status == "failed"
     assert list_files(knowledge_base["id"], db_path)[0]["id"] == first.file_id
     assert any("旧内容" in item["document"] for item in vector_store.records.values())
+
+
+def test_post_vector_persistence_failure_restores_old_version(tmp_path, db_path, monkeypatch):
+    import app.knowledge.ingest as ingest_module
+    from app.knowledge.ingest import ingest_file
+    from app.storage.knowledge_base_store import create_knowledge_base, list_chunk_records, list_files
+
+    knowledge_base = create_knowledge_base("后置失败", db_path)
+    settings = make_test_settings(tmp_path, db_path)
+    vector_store = FakeVectorStore()
+    first = ingest_file(
+        knowledge_base["id"], "same.txt", "旧内容".encode("utf-8"), settings,
+        db_path=db_path, embedding_function=FakeEmbedding(), vector_store=vector_store,
+    )
+    stored_path = settings.upload_dir / knowledge_base["id"] / f"{first.file_id}.source"
+    old_chunks = list_chunk_records(first.file_id, db_path)
+    original_replace = ingest_module.replace_chunk_records
+    calls = 0
+
+    def fail_once(file_id, chunks, db_path=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("chunk persistence failed")
+        return original_replace(file_id, chunks, db_path)
+
+    monkeypatch.setattr(ingest_module, "replace_chunk_records", fail_once)
+    failed = ingest_file(
+        knowledge_base["id"], "same.txt", "新内容".encode("utf-8"), settings,
+        db_path=db_path, embedding_function=FakeEmbedding(), vector_store=vector_store,
+    )
+
+    assert failed.status == "failed"
+    assert stored_path.read_bytes() == "旧内容".encode("utf-8")
+    assert list_files(knowledge_base["id"], db_path)[0]["content_hash"] == sha256("旧内容".encode("utf-8")).hexdigest()
+    assert list_chunk_records(first.file_id, db_path) == old_chunks
+    assert any("旧内容" in item["document"] for item in vector_store.records.values())
+    assert all("新内容" not in item["document"] for item in vector_store.records.values())
+
+
+def test_delete_file_sqlite_failure_restores_external_resources(tmp_path, db_path, monkeypatch):
+    import app.knowledge.ingest as ingest_module
+    from app.knowledge.ingest import delete_file, ingest_file
+    from app.storage.knowledge_base_store import create_knowledge_base, get_file
+
+    knowledge_base = create_knowledge_base("删除补偿", db_path)
+    settings = make_test_settings(tmp_path, db_path)
+    vector_store = FakeVectorStore()
+    result = ingest_file(
+        knowledge_base["id"], "lesson.txt", "内容".encode("utf-8"), settings, db_path=db_path,
+        embedding_function=FakeEmbedding(), vector_store=vector_store,
+    )
+    stored_path = settings.upload_dir / knowledge_base["id"] / f"{result.file_id}.source"
+    original_delete = ingest_module.delete_file_record
+
+    def fail_once(file_id, db_path=None):
+        monkeypatch.setattr(ingest_module, "delete_file_record", original_delete)
+        raise RuntimeError("sqlite delete failed")
+
+    monkeypatch.setattr(ingest_module, "delete_file_record", fail_once)
+    with pytest.raises(AppError, match="删除文件失败"):
+        delete_file(knowledge_base["id"], result.file_id, settings, db_path=db_path, vector_store=vector_store)
+
+    assert stored_path.read_bytes() == "内容".encode("utf-8")
+    assert get_file(result.file_id, db_path)["id"] == result.file_id
+    assert vector_store.records
+
+    delete_file(knowledge_base["id"], result.file_id, settings, db_path=db_path, vector_store=vector_store)
+    assert not stored_path.exists()
+    assert not vector_store.records
+
+
+def test_ingest_missing_knowledge_base_raises_not_found(tmp_path, db_path):
+    from app.knowledge.ingest import ingest_file
+
+    with pytest.raises(NotFoundError, match="知识库不存在"):
+        ingest_file(
+            "missing", "lesson.txt", "内容".encode("utf-8"), make_test_settings(tmp_path, db_path),
+            db_path=db_path, embedding_function=FakeEmbedding(), vector_store=FakeVectorStore(),
+        )
 
 
 def test_delete_file_rejects_file_from_another_knowledge_base(tmp_path, db_path):

@@ -4,7 +4,7 @@ import sqlite3
 from uuid import uuid4
 
 from app.core.database import get_connection, init_db
-from app.core.errors import NotFoundError, ValidationError
+from app.core.errors import AppError, NotFoundError, ValidationError
 
 
 DEFAULT_DB_PATH = Path("data/app.sqlite3")
@@ -87,12 +87,81 @@ def rename_knowledge_base(knowledge_base_id: str, name: str, db_path: Path | Non
     return get_knowledge_base(knowledge_base_id, db_path)
 
 
-def delete_knowledge_base(knowledge_base_id: str, db_path: Path | None = None) -> None:
-    with _connection(db_path) as conn:
-        cursor = conn.execute("DELETE FROM knowledge_bases WHERE id = ?", (knowledge_base_id,))
-        if cursor.rowcount == 0:
-            raise NotFoundError("知识库不存在")
-        conn.commit()
+def delete_knowledge_base(
+    knowledge_base_id: str,
+    db_path: Path | None = None,
+    *,
+    settings=None,
+    vector_store=None,
+) -> None:
+    get_knowledge_base(knowledge_base_id, db_path)
+    files = list_files(knowledge_base_id, db_path)
+    if not files:
+        with _connection(db_path) as conn:
+            conn.execute("DELETE FROM knowledge_bases WHERE id = ?", (knowledge_base_id,))
+            conn.commit()
+        return
+    if settings is None and vector_store is None:
+        raise AppError("删除知识库需要提供向量存储配置")
+
+    from app.knowledge.ingest import (
+        _delete_vector_collection,
+        _restore_file,
+        _snapshot_vectors,
+        _upsert_vector_snapshot,
+    )
+
+    store = vector_store
+    if store is None:
+        from app.knowledge.vector_store import get_vector_store
+
+        store = get_vector_store(knowledge_base_id, settings)
+    snapshots = []
+    try:
+        for file_record in files:
+            path = Path(file_record["stored_path"])
+            content = path.read_bytes() if path.exists() else None
+            chunks = list_chunk_records(file_record["id"], db_path)
+            vector_ids = [item["vector_id"] for item in chunks]
+            vectors = _snapshot_vectors(store, vector_ids)
+            if vector_ids and (vectors is None or set(vectors) != set(vector_ids)):
+                raise AppError("无法获取知识库的完整向量快照，已取消删除")
+            snapshots.append((path, content, vectors, vector_ids))
+
+        for _, _, _, vector_ids in snapshots:
+            if vector_ids:
+                store.delete(ids=vector_ids)
+        _delete_vector_collection(store)
+        for path, _, _, _ in snapshots:
+            if path.exists():
+                path.unlink()
+
+        with _connection(db_path) as conn:
+            cursor = conn.execute(
+                "DELETE FROM knowledge_bases WHERE id = ?", (knowledge_base_id,)
+            )
+            if cursor.rowcount == 0:
+                raise NotFoundError("知识库不存在")
+            conn.commit()
+        for path, _, _, _ in snapshots:
+            try:
+                path.parent.rmdir()
+            except OSError:
+                pass
+    except NotFoundError:
+        raise
+    except Exception as exc:
+        rollback_errors = []
+        for path, content, vectors, _ in snapshots:
+            try:
+                _restore_file(path, content)
+                _upsert_vector_snapshot(store, vectors)
+            except Exception as rollback_exc:
+                rollback_errors.append(rollback_exc)
+        message = f"删除知识库失败：{exc}"
+        if rollback_errors:
+            message += "；补偿失败：" + "；".join(str(error) for error in rollback_errors)
+        raise AppError(message) from exc
 
 
 def list_files(knowledge_base_id: str, db_path: Path | None = None) -> list[dict]:
