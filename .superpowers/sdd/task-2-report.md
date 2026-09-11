@@ -73,3 +73,32 @@ pytest tests/test_ingest.py tests/test_database.py -q
 
 - 测试使用 fake embedding/vector store，未连接真实 DashScope 或 Chroma；真实后端的 collection 删除 API 仍需环境 smoke test。
 - 补偿流程是同步的 best-effort 操作，没有引入持久化恢复队列；若底层文件系统、SQLite 或向量后端在补偿本身持续不可用，错误会以 `AppError` 暴露，残留状态需要运维处理。
+
+## 复审修复（knowledge base deletion boundaries）
+
+### 修改文件
+
+- `app/storage/knowledge_base_store.py`
+- `app/knowledge/ingest.py`
+- `tests/test_ingest.py`
+
+### 行为摘要
+
+- storage 层的 `delete_knowledge_base(knowledge_base_id, db_path=None)` 恢复为只负责 SQLite 删除；外部资源由 ingest 层 `delete_knowledge_base` 编排。
+- 知识库删除和 `clear_knowledge_base` 即使 files 为空也会获取隔离的 vector store，检查 collection 删除能力，清理知识库 upload 根目录中的孤儿文件/目录，并删除 collection。
+- 没有 `delete_collection` 或可用 Chroma client/collection 入口时直接抛出 `AppError`，不会报告成功。
+- collection 删除前保存 file/chunk、向量和 upload 根目录快照；collection 或 SQLite 清理失败时恢复这些状态，支持重试。
+- `delete_file` 的文件快照读取进入 `try`，文件系统错误统一转换为带“删除文件失败”前缀的 `AppError`。
+
+### 测试命令及实际输出
+
+```text
+pytest tests/test_ingest.py tests/test_database.py -q
+....................................                                     [100%]
+36 passed in 2.10s
+```
+
+### 仍存在的风险
+
+- 真实 Chroma 后端未在本地测试；其 collection 删除入口和删除后重新 upsert 的具体行为仍需部署环境 smoke test。
+- 补偿是同步 best-effort 流程；若底层在补偿阶段持续不可用，错误会以 `AppError` 暴露，残留资源需要运维重试或处理。

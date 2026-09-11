@@ -2,6 +2,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
+import shutil
 from uuid import uuid4
 
 from app.core.errors import AppError, NotFoundError
@@ -9,6 +10,8 @@ from app.knowledge.chunking import chunk_text
 from app.knowledge.validation import validate_upload
 from app.storage.knowledge_base_store import (
     _now,
+    clear_file_records,
+    delete_knowledge_base as delete_knowledge_base_record,
     delete_file_record,
     get_file,
     get_knowledge_base,
@@ -99,6 +102,63 @@ def _delete_vector_collection(store) -> None:
     collection_name = getattr(collection, "name", None)
     if client is not None and collection_name:
         client.delete_collection(name=collection_name)
+        return
+    raise AppError("向量存储不支持删除 collection")
+
+
+def _collection_delete_supported(store) -> bool:
+    if callable(getattr(store, "delete_collection", None)):
+        return True
+    client = getattr(store, "_client", None)
+    collection = getattr(store, "_collection", None)
+    return client is not None and bool(getattr(collection, "name", None))
+
+
+def _upload_root(settings, knowledge_base_id: str) -> Path:
+    return Path(settings.upload_dir) / knowledge_base_id
+
+
+def _snapshot_upload_root(root: Path) -> tuple[bool, list[tuple[Path, bytes]]]:
+    if not root.exists():
+        return False, []
+    if not root.is_dir():
+        raise OSError(f"上传目录不是目录：{root}")
+    files = []
+    for path in root.rglob("*"):
+        if path.is_file():
+            files.append((path.relative_to(root), path.read_bytes()))
+    return True, files
+
+
+def _remove_upload_root(root: Path) -> None:
+    if root.exists():
+        shutil.rmtree(root)
+
+
+def _restore_upload_root(root: Path, existed: bool, files: list[tuple[Path, bytes]]) -> None:
+    if root.exists():
+        shutil.rmtree(root)
+    if not existed:
+        return
+    root.mkdir(parents=True, exist_ok=True)
+    for relative_path, content in files:
+        path = root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+
+def _restore_vector_snapshots(store, snapshots, knowledge_base_id, settings) -> list[Exception]:
+    errors = []
+    for vectors in snapshots:
+        try:
+            _upsert_vector_snapshot(store, vectors)
+        except Exception as exc:
+            try:
+                recovery_store = _vector_store(knowledge_base_id, settings, None, None)
+                _upsert_vector_snapshot(recovery_store, vectors)
+            except Exception as recovery_exc:
+                errors.append(recovery_exc)
+    return errors
 
 
 def _restore_file(path: Path, content: bytes | None) -> None:
@@ -292,9 +352,12 @@ def delete_file(
     file_record = _file_for_knowledge_base(knowledge_base_id, file_id, db_path)
     chunk_records = list_chunk_records(file_id, db_path)
     stored_path = Path(file_record["stored_path"])
-    old_content = stored_path.read_bytes() if stored_path.exists() else None
     vector_ids = [item["vector_id"] for item in chunk_records]
+    store = None
+    vector_snapshot = None
+    old_content = None
     try:
+        old_content = stored_path.read_bytes() if stored_path.exists() else None
         store = _vector_store(knowledge_base_id, settings, None, vector_store)
         vector_snapshot = _snapshot_vectors(store, vector_ids)
         if vector_ids and vector_snapshot is None:
@@ -307,7 +370,7 @@ def delete_file(
     except Exception as exc:
         rollback_errors = []
         try:
-            if vector_ids and "vector_snapshot" in locals() and vector_snapshot is not None:
+            if store is not None and vector_ids and vector_snapshot is not None:
                 _upsert_vector_snapshot(store, vector_snapshot)
             _restore_file(stored_path, old_content)
         except Exception as rollback_exc:
@@ -323,6 +386,64 @@ def delete_file(
         raise AppError(message) from exc
 
 
+def delete_knowledge_base(
+    knowledge_base_id: str,
+    settings,
+    db_path: Path | None = None,
+    vector_store=None,
+) -> None:
+    get_knowledge_base(knowledge_base_id, db_path)
+    store = None
+    root = _upload_root(settings, knowledge_base_id)
+    root_existed = False
+    root_files = []
+    file_snapshots = []
+    try:
+        store = _vector_store(knowledge_base_id, settings, None, vector_store)
+        if not _collection_delete_supported(store):
+            raise AppError("向量存储不支持删除 collection")
+        root_existed, root_files = _snapshot_upload_root(root)
+        for file_record in list_files(knowledge_base_id, db_path):
+            chunks = list_chunk_records(file_record["id"], db_path)
+            vector_ids = [item["vector_id"] for item in chunks]
+            vectors = _snapshot_vectors(store, vector_ids)
+            if vector_ids and (vectors is None or set(vectors) != set(vector_ids)):
+                raise AppError("无法获取知识库的完整向量快照，已取消删除")
+            file_snapshots.append((vector_ids, vectors))
+
+        for vector_ids, _ in file_snapshots:
+            if vector_ids:
+                store.delete(ids=vector_ids)
+        _remove_upload_root(root)
+        _delete_vector_collection(store)
+        delete_knowledge_base_record(knowledge_base_id, db_path)
+    except NotFoundError:
+        rollback_errors = _restore_vector_snapshots(
+            store, [vectors for _, vectors in file_snapshots if vectors is not None],
+            knowledge_base_id, settings,
+        ) if store is not None else []
+        try:
+            _restore_upload_root(root, root_existed, root_files)
+        except Exception as exc:
+            rollback_errors.append(exc)
+        if rollback_errors:
+            raise AppError("删除知识库失败；补偿失败：" + "；".join(map(str, rollback_errors)))
+        raise
+    except Exception as exc:
+        rollback_errors = _restore_vector_snapshots(
+            store, [vectors for _, vectors in file_snapshots if vectors is not None],
+            knowledge_base_id, settings,
+        ) if store is not None else []
+        try:
+            _restore_upload_root(root, root_existed, root_files)
+        except Exception as rollback_exc:
+            rollback_errors.append(rollback_exc)
+        message = f"删除知识库失败：{exc}"
+        if rollback_errors:
+            message += "；补偿失败：" + "；".join(map(str, rollback_errors))
+        raise AppError(message) from exc
+
+
 def clear_knowledge_base(
     knowledge_base_id: str,
     settings,
@@ -330,7 +451,47 @@ def clear_knowledge_base(
     vector_store=None,
 ) -> None:
     get_knowledge_base(knowledge_base_id, db_path)
-    for file_record in list_files(knowledge_base_id, db_path):
-        delete_file(knowledge_base_id, file_record["id"], settings, db_path, vector_store)
-    if vector_store is not None:
-        _delete_vector_collection(vector_store)
+    store = _vector_store(knowledge_base_id, settings, None, vector_store)
+    if not _collection_delete_supported(store):
+        raise AppError("向量存储不支持删除 collection")
+    root = _upload_root(settings, knowledge_base_id)
+    root_existed = False
+    root_files = []
+    file_snapshots = []
+    cleanup_started = False
+    try:
+        root_existed, root_files = _snapshot_upload_root(root)
+        for file_record in list_files(knowledge_base_id, db_path):
+            chunks = list_chunk_records(file_record["id"], db_path)
+            vector_ids = [item["vector_id"] for item in chunks]
+            vectors = _snapshot_vectors(store, vector_ids)
+            if vector_ids and (vectors is None or set(vectors) != set(vector_ids)):
+                raise AppError("无法获取知识库的完整向量快照，已取消清空")
+            file_snapshots.append((file_record, chunks, vector_ids, vectors))
+        cleanup_started = True
+        for _, _, vector_ids, _ in file_snapshots:
+            if vector_ids:
+                store.delete(ids=vector_ids)
+        _remove_upload_root(root)
+        clear_file_records(knowledge_base_id, db_path)
+        _delete_vector_collection(store)
+    except Exception as exc:
+        rollback_errors = _restore_vector_snapshots(
+            store, [vectors for _, _, _, vectors in file_snapshots if vectors is not None],
+            knowledge_base_id, settings,
+        )
+        if cleanup_started:
+            try:
+                _restore_upload_root(root, root_existed, root_files)
+            except Exception as rollback_exc:
+                rollback_errors.append(rollback_exc)
+            for file_record, chunks, _, _ in file_snapshots:
+                try:
+                    upsert_file(file_record, db_path)
+                    replace_chunk_records(file_record["id"], chunks, db_path)
+                except Exception as rollback_exc:
+                    rollback_errors.append(rollback_exc)
+        message = f"清空知识库失败：{exc}"
+        if rollback_errors:
+            message += "；补偿失败：" + "；".join(map(str, rollback_errors))
+        raise AppError(message) from exc

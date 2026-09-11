@@ -1,5 +1,6 @@
 from pathlib import Path
 from hashlib import sha256
+import inspect
 
 import pytest
 
@@ -232,13 +233,8 @@ def test_delete_file_removes_application_copy_records_and_vectors(tmp_path, db_p
 
 
 def test_delete_knowledge_base_removes_copies_records_and_vectors(tmp_path, db_path):
-    from app.knowledge.ingest import ingest_file
-    from app.storage.knowledge_base_store import (
-        create_knowledge_base,
-        delete_knowledge_base,
-        get_knowledge_base,
-        list_files,
-    )
+    from app.knowledge.ingest import delete_knowledge_base, ingest_file
+    from app.storage.knowledge_base_store import create_knowledge_base, get_knowledge_base, list_files
 
     knowledge_base = create_knowledge_base("删除知识库", db_path)
     settings = make_test_settings(tmp_path, db_path)
@@ -255,9 +251,7 @@ def test_delete_knowledge_base_removes_copies_records_and_vectors(tmp_path, db_p
         for result in results
     ]
 
-    delete_knowledge_base(
-        knowledge_base["id"], db_path, settings=settings, vector_store=vector_store,
-    )
+    delete_knowledge_base(knowledge_base["id"], settings, db_path=db_path, vector_store=vector_store)
 
     with pytest.raises(NotFoundError):
         get_knowledge_base(knowledge_base["id"], db_path)
@@ -265,6 +259,148 @@ def test_delete_knowledge_base_removes_copies_records_and_vectors(tmp_path, db_p
     assert not vector_store.records
     assert vector_store.collection_deleted
     assert all(not path.exists() for path in stored_paths)
+
+
+def test_storage_delete_knowledge_base_keeps_simple_sqlite_interface(db_path):
+    from app.storage.knowledge_base_store import delete_knowledge_base
+
+    assert list(inspect.signature(delete_knowledge_base).parameters) == [
+        "knowledge_base_id", "db_path",
+    ]
+
+
+def test_empty_knowledge_base_deletion_removes_orphan_uploads_and_collection(tmp_path, db_path):
+    from app.knowledge.ingest import delete_knowledge_base
+    from app.storage.knowledge_base_store import create_knowledge_base, get_knowledge_base
+
+    knowledge_base = create_knowledge_base("空知识库", db_path)
+    settings = make_test_settings(tmp_path, db_path)
+    orphan_root = settings.upload_dir / knowledge_base["id"]
+    orphan_root.mkdir(parents=True)
+    (orphan_root / "orphan.source").write_bytes(b"orphan")
+    vector_store = FakeVectorStore()
+
+    delete_knowledge_base(knowledge_base["id"], settings, db_path=db_path, vector_store=vector_store)
+
+    with pytest.raises(NotFoundError):
+        get_knowledge_base(knowledge_base["id"], db_path)
+    assert not orphan_root.exists()
+    assert vector_store.collection_deleted
+
+
+def test_collection_delete_without_supported_entrypoint_fails(tmp_path, db_path):
+    from app.knowledge.ingest import delete_knowledge_base
+    from app.storage.knowledge_base_store import create_knowledge_base
+
+    knowledge_base = create_knowledge_base("无 collection 入口", db_path)
+    settings = make_test_settings(tmp_path, db_path)
+
+    class NoCollectionDeleteStore:
+        def delete(self, ids):
+            pass
+
+    with pytest.raises(AppError, match="collection"):
+        delete_knowledge_base(
+            knowledge_base["id"], settings, db_path=db_path,
+            vector_store=NoCollectionDeleteStore(),
+        )
+
+
+def test_collection_delete_failure_restores_resources_for_retry(tmp_path, db_path):
+    from app.knowledge.ingest import delete_knowledge_base, ingest_file
+    from app.storage.knowledge_base_store import create_knowledge_base, get_knowledge_base
+
+    knowledge_base = create_knowledge_base("collection 重试", db_path)
+    settings = make_test_settings(tmp_path, db_path)
+
+    class FailOnceCollectionStore(FakeVectorStore):
+        def __init__(self):
+            super().__init__()
+            self.failed_once = False
+
+        def delete_collection(self):
+            if not self.failed_once:
+                self.failed_once = True
+                raise RuntimeError("collection delete failed")
+            super().delete_collection()
+
+    vector_store = FailOnceCollectionStore()
+    result = ingest_file(
+        knowledge_base["id"], "lesson.txt", b"content", settings, db_path=db_path,
+        embedding_function=FakeEmbedding(), vector_store=vector_store,
+    )
+    root = settings.upload_dir / knowledge_base["id"]
+
+    with pytest.raises(AppError, match="删除知识库失败"):
+        delete_knowledge_base(knowledge_base["id"], settings, db_path=db_path, vector_store=vector_store)
+
+    assert get_knowledge_base(knowledge_base["id"], db_path)["id"] == knowledge_base["id"]
+    assert root.exists()
+    assert result.file_id + ":0" in vector_store.records
+
+    delete_knowledge_base(knowledge_base["id"], settings, db_path=db_path, vector_store=vector_store)
+    assert not root.exists()
+
+
+def test_knowledge_base_db_delete_failure_restores_resources_and_can_retry(
+    tmp_path, db_path, monkeypatch,
+):
+    import app.knowledge.ingest as ingest_module
+    from app.knowledge.ingest import delete_knowledge_base, ingest_file
+    from app.storage.knowledge_base_store import create_knowledge_base, get_knowledge_base
+
+    knowledge_base = create_knowledge_base("知识库删除重试", db_path)
+    settings = make_test_settings(tmp_path, db_path)
+    vector_store = FakeVectorStore()
+    result = ingest_file(
+        knowledge_base["id"], "lesson.txt", "内容".encode("utf-8"), settings,
+        db_path=db_path, embedding_function=FakeEmbedding(), vector_store=vector_store,
+    )
+    root = settings.upload_dir / knowledge_base["id"]
+    original_delete = ingest_module.delete_knowledge_base_record
+
+    def fail_once(knowledge_base_id, db_path=None):
+        monkeypatch.setattr(ingest_module, "delete_knowledge_base_record", original_delete)
+        raise RuntimeError("sqlite delete failed")
+
+    monkeypatch.setattr(ingest_module, "delete_knowledge_base_record", fail_once)
+    with pytest.raises(AppError, match="删除知识库失败"):
+        delete_knowledge_base(knowledge_base["id"], settings, db_path=db_path, vector_store=vector_store)
+
+    assert get_knowledge_base(knowledge_base["id"], db_path)["id"] == knowledge_base["id"]
+    assert root.exists()
+    assert result.file_id + ":0" in vector_store.records
+
+    delete_knowledge_base(knowledge_base["id"], settings, db_path=db_path, vector_store=vector_store)
+    with pytest.raises(NotFoundError):
+        get_knowledge_base(knowledge_base["id"], db_path)
+    assert not root.exists()
+    assert not vector_store.records
+
+
+def test_delete_file_snapshot_read_failure_is_app_error(tmp_path, db_path, monkeypatch):
+    from app.knowledge.ingest import delete_file, ingest_file
+    from app.storage.knowledge_base_store import create_knowledge_base
+
+    knowledge_base = create_knowledge_base("文件读取失败", db_path)
+    settings = make_test_settings(tmp_path, db_path)
+    vector_store = FakeVectorStore()
+    result = ingest_file(
+        knowledge_base["id"], "lesson.txt", b"content", settings, db_path=db_path,
+        embedding_function=FakeEmbedding(), vector_store=vector_store,
+    )
+    stored_path = settings.upload_dir / knowledge_base["id"] / f"{result.file_id}.source"
+    original_read_bytes = Path.read_bytes
+
+    def fail_read(path):
+        if path == stored_path:
+            raise OSError("snapshot read failed")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", fail_read)
+    with pytest.raises(AppError, match="删除文件失败"):
+        delete_file(knowledge_base["id"], result.file_id, settings,
+                    db_path=db_path, vector_store=vector_store)
 
 
 def test_upsert_file_returns_existing_logical_record_on_name_conflict(db_path):
@@ -430,6 +566,83 @@ def test_clear_knowledge_base_removes_files_copies_records_and_vectors(tmp_path,
     assert not list_files(knowledge_base["id"], db_path)
     assert not vector_store.records
     assert all(not path.exists() for path in stored_paths)
+
+
+def test_clear_empty_knowledge_base_removes_orphan_uploads_and_collection(tmp_path, db_path):
+    from app.knowledge.ingest import clear_knowledge_base
+    from app.storage.knowledge_base_store import create_knowledge_base, get_knowledge_base
+
+    knowledge_base = create_knowledge_base("清空空知识库", db_path)
+    settings = make_test_settings(tmp_path, db_path)
+    root = settings.upload_dir / knowledge_base["id"]
+    root.mkdir(parents=True)
+    (root / "orphan.source").write_bytes(b"orphan")
+    vector_store = FakeVectorStore()
+
+    clear_knowledge_base(knowledge_base["id"], settings, db_path=db_path, vector_store=vector_store)
+
+    assert get_knowledge_base(knowledge_base["id"], db_path)["id"] == knowledge_base["id"]
+    assert not root.exists()
+    assert vector_store.collection_deleted
+
+
+def test_clear_collection_failure_restores_file_and_chunk_records(tmp_path, db_path):
+    from app.knowledge.ingest import clear_knowledge_base, ingest_file
+    from app.storage.knowledge_base_store import (
+        create_knowledge_base,
+        list_chunk_records,
+        list_files,
+    )
+
+    knowledge_base = create_knowledge_base("清空记录补偿", db_path)
+    settings = make_test_settings(tmp_path, db_path)
+
+    class FailOnceCollectionStore(FakeVectorStore):
+        def __init__(self):
+            super().__init__()
+            self.failed_once = False
+
+        def delete_collection(self):
+            if not self.failed_once:
+                self.failed_once = True
+                raise RuntimeError("collection delete failed")
+            super().delete_collection()
+
+    vector_store = FailOnceCollectionStore()
+    result = ingest_file(
+        knowledge_base["id"], "lesson.txt", b"content", settings, db_path=db_path,
+        embedding_function=FakeEmbedding(), vector_store=vector_store,
+    )
+    old_chunks = list_chunk_records(result.file_id, db_path)
+
+    with pytest.raises(AppError, match="清空知识库失败"):
+        clear_knowledge_base(knowledge_base["id"], settings, db_path=db_path, vector_store=vector_store)
+
+    assert list_files(knowledge_base["id"], db_path)[0]["id"] == result.file_id
+    assert list_chunk_records(result.file_id, db_path) == old_chunks
+
+
+def test_clear_upload_root_snapshot_read_failure_is_app_error(tmp_path, db_path, monkeypatch):
+    from app.knowledge.ingest import clear_knowledge_base
+    from app.storage.knowledge_base_store import create_knowledge_base
+
+    knowledge_base = create_knowledge_base("清空目录读取失败", db_path)
+    settings = make_test_settings(tmp_path, db_path)
+    root = settings.upload_dir / knowledge_base["id"]
+    root.mkdir(parents=True)
+    target = root / "orphan.source"
+    target.write_bytes(b"orphan")
+    vector_store = FakeVectorStore()
+    original_read_bytes = Path.read_bytes
+
+    def fail_read(path):
+        if path == target:
+            raise OSError("root snapshot read failed")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", fail_read)
+    with pytest.raises(AppError, match="清空知识库失败"):
+        clear_knowledge_base(knowledge_base["id"], settings, db_path=db_path, vector_store=vector_store)
 
 
 def test_vector_store_uses_one_collection_per_knowledge_base(tmp_path, monkeypatch):
