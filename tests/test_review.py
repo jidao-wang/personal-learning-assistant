@@ -570,6 +570,62 @@ def test_submission_claim_is_atomic_and_can_be_released(db_path):
     assert get_review_session(review["id"], db_path)["status"] == "draft"
 
 
+def test_draft_write_cannot_cross_submission_claim(monkeypatch, db_path):
+    from app.storage import review_store
+    from app.storage.knowledge_base_store import create_knowledge_base
+    from app.storage.review_store import claim_review_submission, list_review_answers
+
+    knowledge_base = create_knowledge_base("草稿锁定竞态", db_path)
+    review = create_review_session(
+        knowledge_base["id"], {"file_ids": []}, [make_question()], db_path
+    )
+    question_id = review["questions"][0]["id"]
+    save_review_draft(
+        review["id"], [{"question_id": question_id, "answer_text": "A"}], db_path
+    )
+
+    saver_ident = None
+    entered_write_window = threading.Event()
+    release_write_window = threading.Event()
+    original_now = review_store._now
+
+    def blocking_now():
+        if threading.get_ident() == saver_ident:
+            entered_write_window.set()
+            if not release_write_window.wait(timeout=5):
+                raise AssertionError("未释放草稿写入窗口")
+        return original_now()
+
+    monkeypatch.setattr(review_store, "_now", blocking_now)
+    outcome = []
+
+    def save_late_answer():
+        nonlocal saver_ident
+        saver_ident = threading.get_ident()
+        try:
+            save_review_draft(
+                review["id"],
+                [{"question_id": question_id, "answer_text": "B"}],
+                db_path,
+            )
+        except Exception as exc:
+            outcome.append(exc)
+        else:
+            outcome.append(None)
+
+    thread = threading.Thread(target=save_late_answer)
+    thread.start()
+    assert entered_write_window.wait(timeout=5)
+    assert claim_review_submission(review["id"], db_path) is True
+    release_write_window.set()
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], ValueError)
+    assert list_review_answers(review["id"], db_path)[0]["answer_text"] == "A"
+
+
 def test_submit_review_scores_objective_answers_and_locks_session(db_path, tmp_path):
     from app.core.config import Settings
     from app.review.service import submit_review
