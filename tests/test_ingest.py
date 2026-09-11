@@ -232,6 +232,48 @@ def test_delete_file_removes_application_copy_records_and_vectors(tmp_path, db_p
     assert not vector_store.records
 
 
+
+def test_snapshot_vectors_handles_numpy_like_chroma_payload():
+    from app.knowledge.ingest import _snapshot_vectors
+
+    class ArrayLike:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def tolist(self):
+            return self._rows
+
+        def __len__(self):
+            return len(self._rows)
+
+        def __getitem__(self, index):
+            return self._rows[index]
+
+    class ChromaLikeStore:
+        def get(self, ids=None, include=None):
+            return {
+                "ids": ["a", "b"],
+                "documents": ["doc-a", "doc-b"],
+                "metadatas": [{"i": 1}, {"i": 2}],
+                # Real Chroma often returns embeddings as a multi-row array-like object.
+                "embeddings": ArrayLike([[0.1, 0.2], [0.3, 0.4]]),
+            }
+
+    snapshot = _snapshot_vectors(ChromaLikeStore(), ["a", "b"])
+    assert snapshot == {
+        "a": {
+            "document": "doc-a",
+            "metadata": {"i": 1},
+            "embedding": [0.1, 0.2],
+        },
+        "b": {
+            "document": "doc-b",
+            "metadata": {"i": 2},
+            "embedding": [0.3, 0.4],
+        },
+    }
+
+
 def test_delete_knowledge_base_removes_copies_records_and_vectors(tmp_path, db_path):
     from app.knowledge.ingest import delete_knowledge_base, ingest_file
     from app.storage.knowledge_base_store import create_knowledge_base, get_knowledge_base, list_files

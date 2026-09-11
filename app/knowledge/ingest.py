@@ -66,18 +66,64 @@ def _snapshot_vectors(store, vector_ids: list[str]) -> dict | None:
     if get is None:
         return None
     result = get(ids=vector_ids, include=["documents", "metadatas", "embeddings"])
-    ids = result.get("ids", [])
-    documents = result.get("documents") or []
-    metadatas = result.get("metadatas") or []
-    embeddings = result.get("embeddings") or []
+    ids = _as_sequence(result.get("ids"))
+    documents = _as_sequence(result.get("documents"))
+    metadatas = _as_sequence(result.get("metadatas"))
+    embeddings = _as_embedding_sequence(result.get("embeddings"))
     return {
         vector_id: {
-            "document": documents[index],
-            "metadata": metadatas[index],
+            "document": documents[index] if index < len(documents) else None,
+            "metadata": metadatas[index] if index < len(metadatas) else None,
             "embedding": embeddings[index] if index < len(embeddings) else None,
         }
         for index, vector_id in enumerate(ids)
     }
+
+
+def _as_sequence(value) -> list:
+    """Normalize Chroma/numpy get() payloads without bool(array) checks."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        converted = tolist()
+        if isinstance(converted, list):
+            return converted
+        return [converted]
+    try:
+        return list(value)
+    except TypeError:
+        return []
+
+
+def _as_embedding_sequence(value) -> list:
+    """Convert embedding rows to plain Python lists for restore/upsert."""
+    rows = _as_sequence(value)
+    normalized = []
+    for item in rows:
+        if item is None:
+            normalized.append(None)
+            continue
+        if isinstance(item, list):
+            normalized.append(item)
+            continue
+        if isinstance(item, tuple):
+            normalized.append(list(item))
+            continue
+        tolist = getattr(item, "tolist", None)
+        if callable(tolist):
+            converted = tolist()
+            normalized.append(converted if isinstance(converted, list) else [converted])
+            continue
+        try:
+            normalized.append(list(item))
+        except TypeError:
+            normalized.append(item)
+    return normalized
 
 
 def _upsert_vector_snapshot(store, snapshot: dict) -> None:
