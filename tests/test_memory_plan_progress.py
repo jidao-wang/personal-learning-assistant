@@ -78,6 +78,24 @@ def test_sensitive_preference_is_rejected(db_path):
         save_preference("answer_style", "我的 api_key 是 secret-value", db_path=db_path)
 
 
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("api_key", "safe-looking-value"),
+        ("answer_style", "sk-test1234567890"),
+        ("answer_style", "Bearer eyJtest-token"),
+    ],
+)
+def test_sensitive_preference_keys_and_credential_formats_are_rejected(
+    db_path, key, value
+):
+    from app.core.errors import ValidationError
+    from app.memory.store import save_preference
+
+    with pytest.raises(ValidationError):
+        save_preference(key, value, db_path=db_path)
+
+
 def test_preference_update_uses_same_key(db_path):
     from app.memory.store import get_preferences, save_preference
 
@@ -173,7 +191,6 @@ def test_progress_counts_only_submitted_reviews(db_path):
     assert progress["accuracy"] == 50.0
     assert progress["average_score"] == 50.0
     assert progress["wrong_count"] == 1
-    assert progress["draft_review_count"] == 0
     assert progress["weak_points"] == ["概念二"]
     assert progress["by_question_type"]["choice"] == {
         "question_count": 1,
@@ -181,13 +198,81 @@ def test_progress_counts_only_submitted_reviews(db_path):
         "average_score": 100.0,
     }
     assert "plan_completion_rate" not in progress
+    assert "draft_review_count" not in progress
 
 
 def test_progress_can_aggregate_all_knowledge_bases(db_path):
     from app.progress.service import get_progress
 
     seed_submitted_and_draft_reviews(db_path)
-    assert get_progress(db_path=db_path)["review_count"] == 1
+    second_knowledge_base = create_knowledge_base("进度测试二", db_path)
+    second_review = create_review_session(
+        second_knowledge_base["id"],
+        {"file_ids": []},
+        [
+            {
+                "question_type": "choice",
+                "prompt": "问题三",
+                "options": [
+                    {"label": "A", "text": "正确"},
+                    {"label": "B", "text": "错误"},
+                    {"label": "C", "text": "干扰"},
+                    {"label": "D", "text": "干扰"},
+                ],
+                "correct_answer": "A",
+                "reference_answer": "A",
+                "rubric": "选择正确选项",
+                "knowledge_point": "概念三",
+                "source_chunk_ids": [],
+            }
+        ],
+        db_path=db_path,
+    )
+    save_review_draft(
+        second_review["id"],
+        [{"question_id": second_review["questions"][0]["id"], "answer_text": "A"}],
+        db_path=db_path,
+    )
+    mark_review_submitted(second_review["id"], 100.0, db_path=db_path)
+
+    assert get_progress(db_path=db_path)["review_count"] == 2
+    assert get_progress(db_path=db_path)["question_count"] == 3
+
+
+def test_submitted_review_without_answers_is_counted_as_a_review(db_path):
+    from app.progress.service import get_progress
+
+    knowledge_base = create_knowledge_base("空答案统计", db_path)
+    review = create_review_session(
+        knowledge_base["id"],
+        {"file_ids": []},
+        [
+            {
+                "question_type": "choice",
+                "prompt": "未作答问题",
+                "options": [
+                    {"label": "A", "text": "正确"},
+                    {"label": "B", "text": "错误"},
+                    {"label": "C", "text": "干扰"},
+                    {"label": "D", "text": "干扰"},
+                ],
+                "correct_answer": "A",
+                "reference_answer": "A",
+                "rubric": "选择正确选项",
+                "knowledge_point": "未作答知识点",
+                "source_chunk_ids": [],
+            }
+        ],
+        db_path=db_path,
+    )
+    mark_review_submitted(review["id"], 0.0, db_path=db_path)
+
+    progress = get_progress(knowledge_base_id=knowledge_base["id"], db_path=db_path)
+
+    assert progress["review_count"] == 1
+    assert progress["question_count"] == 0
+    assert progress["average_score"] == 0.0
+    assert progress["by_question_type"]["choice"]["question_count"] == 0
 
 
 def test_agent_preference_confirmation_does_not_call_chat(monkeypatch, db_path):
