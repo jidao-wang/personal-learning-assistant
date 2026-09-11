@@ -7,6 +7,7 @@ from app.core.config import load_settings
 from app.core.errors import AppError, ConfigurationError
 from app.core.llm_client import LLMClient
 from app.knowledge.answer import AnswerPolicy, answer_question
+from app.memory.store import parse_preference_request, save_preference
 
 
 FORCE_CHAT_MARKERS = ("不要查资料", "只聊天", "不用知识库")
@@ -115,6 +116,20 @@ def _base_result(state: AgentState, node_name: str, task_type: str) -> dict[str,
 
 def chat_node(state: AgentState) -> dict[str, Any]:
     result = _base_result(state, "chat_node", "chat")
+    parsed_preference = parse_preference_request(state.get("user_input", ""))
+    if parsed_preference is not None:
+        try:
+            save_preference(
+                parsed_preference["key"],
+                parsed_preference["value"],
+                db_path=state.get("db_path"),
+            )
+            result["answer"] = f"已记住你的偏好：{parsed_preference['value']}。"
+        except AppError as exc:
+            result["answer"] = str(exc)
+            result["error"] = str(exc)
+        result.update({"workspace_type": "chat", "workspace_id": state.get("session_id", "")})
+        return result
     messages = [{"role": item["role"], "content": item["content"]} for item in state.get("messages", [])]
     messages.append({"role": "user", "content": state.get("user_input", "")})
     try:
@@ -184,19 +199,27 @@ def _safe_qa_error(exc: Exception) -> str:
     return "资料问答暂时不可用，请检查配置或稍后重试。"
 
 
-def _tool_node(state: AgentState, node_name: str, task_type: str, tool_name: str) -> dict[str, Any]:
+def _tool_node(
+    state: AgentState,
+    node_name: str,
+    task_type: str,
+    tool_name: str,
+    workspace_type: str | None = None,
+) -> dict[str, Any]:
     result = _base_result(state, node_name, task_type)
-    tool_result = run_tool(
-        tool_name,
-        {
-            "knowledge_base_id": state.get("knowledge_base_id"),
-            "session_id": state.get("session_id"),
-            "user_input": state.get("user_input", ""),
-            "request_options": state.get("request_options", {}),
-        },
-    )
+    tool_args = {
+        "knowledge_base_id": state.get("knowledge_base_id"),
+        "session_id": state.get("session_id"),
+        "user_input": state.get("user_input", ""),
+        "request_options": state.get("request_options", {}),
+    }
+    for key in ("settings", "llm_client", "db_path", "vector_store"):
+        if state.get(key) is not None:
+            tool_args[key] = state[key]
+    tool_result = run_tool(tool_name, tool_args)
     if tool_result["status"] == "success":
         value = tool_result["result"]
+        result["_tool_result"] = value
         if isinstance(value, dict):
             result.update(value)
             result.setdefault("answer", value.get("message", ""))
@@ -206,13 +229,13 @@ def _tool_node(state: AgentState, node_name: str, task_type: str, tool_name: str
         result["answer"] = f"{tool_result['error']}"
         result["error"] = tool_result["error"]
     result.setdefault("answer", "")
-    result.update(
-        {
-            "task_type": task_type,
-            "workspace_type": "knowledge_base",
-            "workspace_id": state.get("knowledge_base_id", ""),
-        }
-    )
+    result.update({
+        "task_type": task_type,
+        "workspace_type": workspace_type or "knowledge_base",
+        "workspace_id": state.get("knowledge_base_id", ""),
+    })
+    if isinstance(tool_result.get("result"), dict) and tool_result["result"].get("status") == "created":
+        result["workspace_id"] = tool_result["result"].get("plan_id", result["workspace_id"])
     return result
 
 
@@ -221,11 +244,18 @@ def review_node(state: AgentState) -> dict[str, Any]:
 
 
 def plan_node(state: AgentState) -> dict[str, Any]:
-    return _tool_node(state, "plan_node", "plan", "generate_plan")
+    result = _tool_node(state, "plan_node", "plan", "generate_plan", workspace_type="plan")
+    value = result.get("_tool_result")
+    if isinstance(value, dict) and value.get("status") == "needs_input":
+        result["answer"] = "请补充：" + "、".join(value.get("missing_fields", []))
+    return result
 
 
 def statistics_node(state: AgentState) -> dict[str, Any]:
-    return _tool_node(state, "statistics_node", "statistics", "get_progress")
+    result = _tool_node(state, "statistics_node", "statistics", "get_progress", workspace_type="statistics")
+    if isinstance(result.get("_tool_result"), dict):
+        result["statistics"] = result["_tool_result"]
+    return result
 
 
 def error_node(state: AgentState) -> dict[str, Any]:
