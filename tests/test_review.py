@@ -692,3 +692,44 @@ def test_normalize_raw_question_accepts_common_llm_aliases():
     assert question.prompt.startswith("常用标准库")
     assert [option.label for option in question.options] == ["A", "B", "C", "D"]
     assert question.correct_answer == "B"
+
+
+def test_generate_questions_retries_then_succeeds():
+    class FlakyLLM(FakeReviewLLM):
+        def __init__(self):
+            self.calls = 0
+
+        def chat_json(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                return super().chat_json(messages)  # only 1 question
+            q = super().chat_json(messages)["questions"][0]
+            q2 = dict(q)
+            q2["prompt"] = "第二题：" + q["prompt"]
+            return {"questions": [q, q2]}
+
+    llm = FlakyLLM()
+    questions = generate_questions(
+        [{"source": "lesson.md", "chunk_id": "file-1:0", "text": "资料"}],
+        {"choice": 2, "judgment": 0, "short_answer": 0},
+        llm,
+        max_attempts=3,
+    )
+    assert len(questions) == 2
+    assert llm.calls == 2
+
+
+def test_generate_questions_accepts_extra_questions_and_trims():
+    class ExtraLLM(FakeReviewLLM):
+        def chat_json(self, messages):
+            q = super().chat_json(messages)["questions"][0]
+            q2 = dict(q)
+            q2["prompt"] = "额外题"
+            return {"questions": [q, q2]}
+
+    questions = generate_questions(
+        [{"source": "lesson.md", "chunk_id": "file-1:0", "text": "资料"}],
+        {"choice": 1, "judgment": 0, "short_answer": 0},
+        ExtraLLM(),
+    )
+    assert len(questions) == 1

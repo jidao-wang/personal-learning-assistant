@@ -183,17 +183,83 @@ def _normalize_raw_question(raw_question: dict) -> dict:
     }
 
 
+def _system_prompt(requested: dict[str, int]) -> str:
+    total = sum(requested.values())
+    return (
+        "你是严格依据学习资料出题的复习题生成器。"
+        f"必须精确生成 choice={requested['choice']}、"
+        f"judgment={requested['judgment']}、"
+        f"short_answer={requested['short_answer']} 道题，"
+        f"questions 数组长度必须等于 {total}。"
+        '只返回 JSON 对象，格式为 {"questions":[...]}。'
+        "每题字段必须使用：question_type(choice|judgment|short_answer)、prompt、options、"
+        "correct_answer、reference_answer、rubric、knowledge_point、source_chunk_ids。"
+        "choice 的 options 必须是 "
+        '[{"label":"A","text":"..."}, {"label":"B","text":"..."}, '
+        '{"label":"C","text":"..."}, {"label":"D","text":"..."}]；'
+        "judgment 的 correct_answer 只能是 正确 或 错误；"
+        "short_answer 必须有非空 rubric。"
+        "source_chunk_ids 只能填写资料提供的 chunk_id，不得编造。"
+    )
+
+
+def _parse_questions(
+    raw_questions,
+    requested: dict[str, int],
+    allowed_chunk_ids: set[str],
+) -> tuple[list[dict], str | None]:
+    if not isinstance(raw_questions, list):
+        return [], "模型未返回 questions 数组"
+
+    parsed: list[dict] = []
+    for raw_question in raw_questions:
+        try:
+            normalized = _normalize_raw_question(raw_question)
+            question = GeneratedQuestion(**normalized)
+        except Exception as exc:
+            return [], f"题目格式无效：{exc}"
+
+        source_chunk_ids = list(question.source_chunk_ids)
+        if source_chunk_ids and not set(source_chunk_ids).issubset(allowed_chunk_ids):
+            return [], "题目包含不属于当前资料的来源"
+        parsed.append(_as_dict(question))
+
+    buckets = {key: [] for key in requested}
+    for question in parsed:
+        qtype = question.get("question_type")
+        if qtype in buckets:
+            buckets[qtype].append(question)
+
+    actual_counts = {key: len(buckets[key]) for key in requested}
+    if any(actual_counts[key] < requested[key] for key in requested):
+        detail = "、".join(
+            f"{key}需要{requested[key]}道/有效{actual_counts[key]}道"
+            for key in requested
+            if requested[key] or actual_counts[key]
+        )
+        return [], f"模型生成的题目数量与请求不一致（{detail}）"
+
+    selected: list[dict] = []
+    for key in ("choice", "judgment", "short_answer"):
+        selected.extend(buckets[key][: requested[key]])
+    return selected, None
+
+
 def generate_questions(
     contexts: list[dict],
     counts: dict[str, int],
     llm_client,
+    max_attempts: int = 3,
 ) -> list[dict]:
+    """Generate questions with a few bounded retries. Never loops forever."""
     requested = validate_question_counts(
         counts.get("choice", 0),
         counts.get("judgment", 0),
         counts.get("short_answer", 0),
     )
-    allowed_chunk_ids = {item.get("chunk_id", "") for item in contexts if item.get("chunk_id")}
+    allowed_chunk_ids = {
+        item.get("chunk_id", "") for item in contexts if item.get("chunk_id")
+    }
     context_payload = [
         {
             "source": item.get("source", ""),
@@ -203,41 +269,50 @@ def generate_questions(
         }
         for item in contexts
     ]
+
+    attempts = max(1, int(max_attempts or 1))
+    last_error = "模型生成的题目数量与请求不一致"
     messages = [
-        {
-            "role": "system",
-            "content": (
-                "你是严格依据学习资料出题的复习题生成器。"
-                f"必须精确生成 choice={requested['choice']}、"
-                f"judgment={requested['judgment']}、"
-                f"short_answer={requested['short_answer']} 道题。"
-                "只返回 JSON 对象，格式为 {\"questions\":[...] }。"
-                "choice 必须恰好有 A、B、C、D 四个选项；judgment 的答案只能是正确或错误；"
-                "short_answer 必须有非空 rubric。source_chunk_ids 只能填写下方资料提供的 chunk_id，"
-                "不得编造、改写或填写资料之外的来源。"
-            ),
-        },
+        {"role": "system", "content": _system_prompt(requested)},
         {
             "role": "user",
             "content": "当前资料：\n" + json.dumps(context_payload, ensure_ascii=False),
         },
     ]
-    result = llm_client.chat_json(messages)
-    raw_questions = result.get("questions") if isinstance(result, dict) else None
-    if not isinstance(raw_questions, list):
-        raise ValueError("模型生成的题目数量与请求不一致")
-    if len(raw_questions) != sum(requested.values()):
-        raise ValueError("模型生成的题目数量与请求不一致")
 
-    questions = []
-    actual_counts = {key: 0 for key in requested}
-    for raw_question in raw_questions:
-        question = GeneratedQuestion(**_normalize_raw_question(raw_question))
-        actual_counts[question.question_type] += 1
-        source_chunk_ids = list(question.source_chunk_ids)
-        if not set(source_chunk_ids).issubset(allowed_chunk_ids):
-            raise ValueError("题目包含不属于当前资料的来源")
-        questions.append(_as_dict(question))
-    if actual_counts != requested:
-        raise ValueError("模型生成的题目数量与请求不一致")
-    return questions
+    for attempt in range(1, attempts + 1):
+        result = llm_client.chat_json(messages)
+        raw_questions = result.get("questions") if isinstance(result, dict) else None
+        questions, error = _parse_questions(raw_questions, requested, allowed_chunk_ids)
+        if error is None:
+            return questions
+
+        last_error = error
+        if attempt >= attempts:
+            break
+
+        messages = list(messages) + [
+            {
+                "role": "assistant",
+                "content": json.dumps(
+                    result if isinstance(result, dict) else {}, ensure_ascii=False
+                )[:4000],
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"上一次输出不合格：{error}。"
+                    f"请严格重生成：choice={requested['choice']}、"
+                    f"judgment={requested['judgment']}、"
+                    f"short_answer={requested['short_answer']}，"
+                    f"questions 长度必须为 {sum(requested.values())}。"
+                    "只返回 JSON。"
+                ),
+            },
+        ]
+
+    if "来源" in last_error:
+        raise ValueError(last_error)
+    raise ValueError(
+        f"{last_error}。已自动重试 {attempts} 次仍失败，请减少题量后再试，或稍后再点生成。"
+    )
