@@ -51,7 +51,8 @@ class FakeVectorStoreWithContext:
 
 class FakeReviewLLM:
     def chat_json(self, messages):
-        if "评分器" in messages[0]["content"]:
+        content = messages[0]["content"]
+        if "评分器" in content:
             return {
                 "score": 80,
                 "feedback": "覆盖了主要概念，但缺少一个关键条件。",
@@ -60,25 +61,65 @@ class FakeReviewLLM:
                     {"source": "fake.md", "chunk_id": "fake:0"},
                 ],
             }
-        return {
-            "questions": [
-                {
-                    "question_type": "choice",
-                    "prompt": "Agent 的核心能力是什么？",
-                    "options": [
-                        {"label": "A", "text": "调用工具"},
-                        {"label": "B", "text": "只输出固定文本"},
-                        {"label": "C", "text": "删除资料"},
-                        {"label": "D", "text": "关闭程序"},
-                    ],
-                    "correct_answer": "A",
-                    "reference_answer": "A",
-                    "rubric": "选择正确选项",
-                    "knowledge_point": "Agent",
-                    "source_chunk_ids": ["file-1:0"],
-                }
-            ]
-        }
+        import re
+
+        count_match = re.search(r"COUNT=(\d+)", content)
+        type_match = re.search(r"ONLY_TYPE=([a-z_]+)", content)
+        count = int(count_match.group(1)) if count_match else 1
+        qtype = type_match.group(1) if type_match else "choice"
+        # Legacy bulk-prompt tests may still ask choice=2 without ONLY_TYPE.
+        if type_match is None:
+            choice_match = re.search(r"choice=(\d+)", content)
+            if choice_match and int(choice_match.group(1)) > 0:
+                qtype = "choice"
+                count = int(choice_match.group(1))
+        questions = []
+        for index in range(count):
+            if qtype == "judgment":
+                questions.append(
+                    {
+                        "question_type": "judgment",
+                        "prompt": f"判断{index+1}：Agent 可以调用工具。",
+                        "options": [],
+                        "correct_answer": "正确",
+                        "reference_answer": "正确",
+                        "rubric": "判断对错",
+                        "knowledge_point": "Agent",
+                        "source_chunk_ids": ["file-1:0"],
+                    }
+                )
+            elif qtype == "short_answer":
+                questions.append(
+                    {
+                        "question_type": "short_answer",
+                        "prompt": f"简答{index+1}：什么是 Agent？",
+                        "options": [],
+                        "correct_answer": "可调用工具完成任务的智能体",
+                        "reference_answer": "可调用工具完成任务的智能体",
+                        "rubric": "提到工具或任务",
+                        "knowledge_point": "Agent",
+                        "source_chunk_ids": ["file-1:0"],
+                    }
+                )
+            else:
+                questions.append(
+                    {
+                        "question_type": "choice",
+                        "prompt": f"选择题{index+1}：Agent 的核心能力是什么？",
+                        "options": [
+                            {"label": "A", "text": "调用工具"},
+                            {"label": "B", "text": "只输出固定文本"},
+                            {"label": "C", "text": "删除资料"},
+                            {"label": "D", "text": "关闭程序"},
+                        ],
+                        "correct_answer": "A",
+                        "reference_answer": "A",
+                        "rubric": "选择正确选项",
+                        "knowledge_point": "Agent",
+                        "source_chunk_ids": ["file-1:0"],
+                    }
+                )
+        return {"questions": questions}
 
 
 def make_question(question_type="choice", **overrides):
@@ -298,11 +339,18 @@ def test_short_answer_rubric_none_is_rejected():
 
 
 def test_generate_questions_rejects_model_count_mismatch():
+    class ShortLLM(FakeReviewLLM):
+        def chat_json(self, messages):
+            result = super().chat_json(messages)
+            result["questions"] = result["questions"][:1]
+            return result
+
     with pytest.raises(ValueError, match="题目数量与请求不一致"):
         generate_questions(
             [{"source": "lesson.md", "chunk_id": "file-1:0", "text": "资料"}],
             {"choice": 2, "judgment": 0, "short_answer": 0},
-            FakeReviewLLM(),
+            ShortLLM(),
+            max_attempts=2,
         )
 
 
@@ -701,12 +749,10 @@ def test_generate_questions_retries_then_succeeds():
 
         def chat_json(self, messages):
             self.calls += 1
+            result = super().chat_json(messages)
             if self.calls == 1:
-                return super().chat_json(messages)  # only 1 question
-            q = super().chat_json(messages)["questions"][0]
-            q2 = dict(q)
-            q2["prompt"] = "第二题：" + q["prompt"]
-            return {"questions": [q, q2]}
+                result["questions"] = result["questions"][:1]
+            return result
 
     llm = FlakyLLM()
     questions = generate_questions(
@@ -733,3 +779,34 @@ def test_generate_questions_accepts_extra_questions_and_trims():
         ExtraLLM(),
     )
     assert len(questions) == 1
+
+
+def test_generate_questions_mixed_types_by_separate_calls():
+    class CountingLLM(FakeReviewLLM):
+        def __init__(self):
+            self.calls = 0
+            self.types = []
+
+        def chat_json(self, messages):
+            self.calls += 1
+            import re
+            content = messages[0]["content"]
+            m = re.search(r"ONLY_TYPE=([a-z_]+)", content)
+            self.types.append(m.group(1) if m else None)
+            return super().chat_json(messages)
+
+    llm = CountingLLM()
+    questions = generate_questions(
+        [{"source": "lesson.md", "chunk_id": "file-1:0", "text": "资料"}],
+        {"choice": 2, "judgment": 1, "short_answer": 1},
+        llm,
+    )
+    assert len(questions) == 4
+    assert [q["question_type"] for q in questions] == [
+        "choice",
+        "choice",
+        "judgment",
+        "short_answer",
+    ]
+    assert llm.calls == 3
+    assert llm.types == ["choice", "judgment", "short_answer"]

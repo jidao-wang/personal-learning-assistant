@@ -183,23 +183,21 @@ def _normalize_raw_question(raw_question: dict) -> dict:
     }
 
 
-def _system_prompt(requested: dict[str, int]) -> str:
-    total = sum(requested.values())
+def _type_system_prompt(question_type: str, count: int) -> str:
     return (
         "你是严格依据学习资料出题的复习题生成器。"
-        f"必须精确生成 choice={requested['choice']}、"
-        f"judgment={requested['judgment']}、"
-        f"short_answer={requested['short_answer']} 道题，"
-        f"questions 数组长度必须等于 {total}。"
+        f"ONLY_TYPE={question_type}; COUNT={count}。"
+        f"必须只生成 question_type={question_type} 的题目，恰好 {count} 道，"
+        f"questions 数组长度必须等于 {count}。"
         '只返回 JSON 对象，格式为 {"questions":[...]}。'
-        "每题字段必须使用：question_type(choice|judgment|short_answer)、prompt、options、"
-        "correct_answer、reference_answer、rubric、knowledge_point、source_chunk_ids。"
-        "choice 的 options 必须是 "
-        '[{"label":"A","text":"..."}, {"label":"B","text":"..."}, '
-        '{"label":"C","text":"..."}, {"label":"D","text":"..."}]；'
-        "judgment 的 correct_answer 只能是 正确 或 错误；"
-        "short_answer 必须有非空 rubric。"
-        "source_chunk_ids 只能填写资料提供的 chunk_id，不得编造。"
+        "每题字段必须使用：question_type、prompt、options、correct_answer、"
+        "reference_answer、rubric、knowledge_point、source_chunk_ids。"
+        "若是 choice：options 必须是 "
+        '[{"label":"A","text":"..."},{"label":"B","text":"..."},'
+        '{"label":"C","text":"..."},{"label":"D","text":"..."}]，correct_answer 为 A/B/C/D。'
+        "若是 judgment：correct_answer 只能是 正确 或 错误，options 为空数组。"
+        "若是 short_answer：rubric 必须非空，options 为空数组。"
+        "source_chunk_ids 只能填写资料中的 chunk_id，不得编造。"
     )
 
 
@@ -241,8 +239,69 @@ def _parse_questions(
 
     selected: list[dict] = []
     for key in ("choice", "judgment", "short_answer"):
-        selected.extend(buckets[key][: requested[key]])
+        if key in requested:
+            selected.extend(buckets[key][: requested[key]])
     return selected, None
+
+
+def _generate_one_type(
+    question_type: str,
+    count: int,
+    context_payload: list[dict],
+    allowed_chunk_ids: set[str],
+    llm_client,
+    max_attempts: int,
+) -> list[dict]:
+    requested = {question_type: count}
+    attempts = max(1, int(max_attempts or 1))
+    last_error = "模型生成的题目数量与请求不一致"
+    messages = [
+        {"role": "system", "content": _type_system_prompt(question_type, count)},
+        {
+            "role": "user",
+            "content": "当前资料：\n" + json.dumps(context_payload, ensure_ascii=False),
+        },
+    ]
+
+    for attempt in range(1, attempts + 1):
+        result = llm_client.chat_json(messages)
+        raw_questions = result.get("questions") if isinstance(result, dict) else None
+        questions, error = _parse_questions(raw_questions, requested, allowed_chunk_ids)
+        if error is None:
+            # Force type in case model mislabels slightly after normalize.
+            fixed = []
+            for item in questions:
+                item = dict(item)
+                item["question_type"] = question_type
+                fixed.append(item)
+            return fixed[:count]
+
+        last_error = error
+        if attempt >= attempts:
+            break
+        messages = list(messages) + [
+            {
+                "role": "assistant",
+                "content": json.dumps(
+                    result if isinstance(result, dict) else {}, ensure_ascii=False
+                )[:4000],
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"上一次输出不合格：{error}。"
+                    f"请只生成 {count} 道 {question_type} 题，questions 长度必须为 {count}。"
+                    "只返回 JSON。"
+                ),
+            },
+        ]
+
+    if "来源" in last_error:
+        raise ValueError(last_error)
+    raise ValueError(
+        f"{last_error}。已自动重试 {attempts} 次仍失败（题型 {question_type}×{count}），"
+        "请稍后再试或先减少该题型数量。"
+    )
 
 
 def generate_questions(
@@ -251,7 +310,7 @@ def generate_questions(
     llm_client,
     max_attempts: int = 3,
 ) -> list[dict]:
-    """Generate questions with a few bounded retries. Never loops forever."""
+    """Generate by question type so mixed defaults like 2/1/1 stay reliable."""
     requested = validate_question_counts(
         counts.get("choice", 0),
         counts.get("judgment", 0),
@@ -270,49 +329,19 @@ def generate_questions(
         for item in contexts
     ]
 
-    attempts = max(1, int(max_attempts or 1))
-    last_error = "模型生成的题目数量与请求不一致"
-    messages = [
-        {"role": "system", "content": _system_prompt(requested)},
-        {
-            "role": "user",
-            "content": "当前资料：\n" + json.dumps(context_payload, ensure_ascii=False),
-        },
-    ]
-
-    for attempt in range(1, attempts + 1):
-        result = llm_client.chat_json(messages)
-        raw_questions = result.get("questions") if isinstance(result, dict) else None
-        questions, error = _parse_questions(raw_questions, requested, allowed_chunk_ids)
-        if error is None:
-            return questions
-
-        last_error = error
-        if attempt >= attempts:
-            break
-
-        messages = list(messages) + [
-            {
-                "role": "assistant",
-                "content": json.dumps(
-                    result if isinstance(result, dict) else {}, ensure_ascii=False
-                )[:4000],
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"上一次输出不合格：{error}。"
-                    f"请严格重生成：choice={requested['choice']}、"
-                    f"judgment={requested['judgment']}、"
-                    f"short_answer={requested['short_answer']}，"
-                    f"questions 长度必须为 {sum(requested.values())}。"
-                    "只返回 JSON。"
-                ),
-            },
-        ]
-
-    if "来源" in last_error:
-        raise ValueError(last_error)
-    raise ValueError(
-        f"{last_error}。已自动重试 {attempts} 次仍失败，请减少题量后再试，或稍后再点生成。"
-    )
+    questions: list[dict] = []
+    for question_type in ("choice", "judgment", "short_answer"):
+        count = requested[question_type]
+        if count <= 0:
+            continue
+        questions.extend(
+            _generate_one_type(
+                question_type,
+                count,
+                context_payload,
+                allowed_chunk_ids,
+                llm_client,
+                max_attempts=max_attempts,
+            )
+        )
+    return questions
