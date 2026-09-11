@@ -399,11 +399,18 @@ def delete_knowledge_base(
     root_files = []
     file_snapshots = []
     try:
+        existing_files = list_files(knowledge_base_id, db_path)
+        # Empty knowledge bases only need DB + upload-dir cleanup.
+        if not existing_files:
+            _remove_upload_root(root)
+            delete_knowledge_base_record(knowledge_base_id, db_path)
+            return
+
         store = _vector_store(knowledge_base_id, settings, None, vector_store)
         if not _collection_delete_supported(store):
             raise AppError("向量存储不支持删除 collection")
         root_existed, root_files = _snapshot_upload_root(root)
-        for file_record in list_files(knowledge_base_id, db_path):
+        for file_record in existing_files:
             chunks = list_chunk_records(file_record["id"], db_path)
             vector_ids = [item["vector_id"] for item in chunks]
             vectors = _snapshot_vectors(store, vector_ids)

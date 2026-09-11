@@ -269,7 +269,7 @@ def test_storage_delete_knowledge_base_keeps_simple_sqlite_interface(db_path):
     ]
 
 
-def test_empty_knowledge_base_deletion_removes_orphan_uploads_and_collection(tmp_path, db_path):
+def test_empty_knowledge_base_deletion_removes_orphan_uploads_without_vector_store(tmp_path, db_path):
     from app.knowledge.ingest import delete_knowledge_base
     from app.storage.knowledge_base_store import create_knowledge_base, get_knowledge_base
 
@@ -285,15 +285,26 @@ def test_empty_knowledge_base_deletion_removes_orphan_uploads_and_collection(tmp
     with pytest.raises(NotFoundError):
         get_knowledge_base(knowledge_base["id"], db_path)
     assert not orphan_root.exists()
-    assert vector_store.collection_deleted
+    # Empty libraries skip vector cleanup entirely.
+    assert vector_store.collection_deleted is False
 
 
 def test_collection_delete_without_supported_entrypoint_fails(tmp_path, db_path):
-    from app.knowledge.ingest import delete_knowledge_base
+    from app.knowledge.ingest import delete_knowledge_base, ingest_file
     from app.storage.knowledge_base_store import create_knowledge_base
 
     knowledge_base = create_knowledge_base("无 collection 入口", db_path)
     settings = make_test_settings(tmp_path, db_path)
+    vector_store = FakeVectorStore()
+    ingest_file(
+        knowledge_base["id"],
+        "lesson.txt",
+        b"content",
+        settings,
+        db_path=db_path,
+        embedding_function=FakeEmbedding(),
+        vector_store=vector_store,
+    )
 
     class NoCollectionDeleteStore:
         def delete(self, ids):

@@ -200,7 +200,9 @@ function renderKnowledgeBases() {
 
   els.knowledgeBaseList.innerHTML = "";
   if (!state.knowledgeBases.length) {
-    els.knowledgeBaseList.appendChild(emptyState("还没有知识库，先创建一个。"));
+    els.knowledgeBaseList.appendChild(
+      emptyState("还没有知识库。请填写名称并选择 txt/md 文件后创建。")
+    );
     return;
   }
   state.knowledgeBases.forEach((item) => {
@@ -415,14 +417,71 @@ async function createKnowledgeBase() {
     alert("请输入知识库名称");
     return;
   }
-  const created = await api("/api/knowledge-bases", {
-    method: "POST",
-    body: JSON.stringify({ name }),
-  });
-  els.knowledgeBaseName.value = "";
-  await loadKnowledgeBases();
-  await switchKnowledgeBase(created.id);
-  showView("knowledge");
+  const files = Array.from(els.fileInput.files || []);
+  if (!files.length) {
+    alert("创建知识库时必须同时选择至少一个 txt/md 文件");
+    return;
+  }
+
+  let created = null;
+  try {
+    created = await api("/api/knowledge-bases", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+    await switchKnowledgeBase(created.id);
+
+    const formData = new FormData();
+    files.forEach((file) => formData.append("files", file));
+    const results = await api(`/api/knowledge-bases/${created.id}/files`, {
+      method: "POST",
+      body: formData,
+    });
+    const readyCount = results.filter((item) => item.status === "ready").length;
+    if (!readyCount) {
+      const reason = results
+        .map((item) => `${item.filename || "文件"}: ${item.error_message || item.status}`)
+        .join("\n");
+      try {
+        await api(`/api/knowledge-bases/${created.id}`, { method: "DELETE" });
+      } catch (cleanupError) {
+        console.error(cleanupError);
+      }
+      state.knowledgeBaseId = null;
+      state.sessionId = null;
+      state.files = [];
+      els.knowledgeBaseName.value = "";
+      els.fileInput.value = "";
+      await loadKnowledgeBases();
+      await switchKnowledgeBase("");
+      alert(`创建失败：没有成功入库的文件。\n${reason}`);
+      return;
+    }
+
+    els.knowledgeBaseName.value = "";
+    els.fileInput.value = "";
+    await loadKnowledgeBases();
+    await switchKnowledgeBase(created.id);
+    await refreshFiles();
+    showView("knowledge");
+    if (readyCount < results.length) {
+      alert(`知识库已创建，但有 ${results.length - readyCount} 个文件失败。`);
+    }
+  } catch (error) {
+    if (created?.id) {
+      try {
+        await api(`/api/knowledge-bases/${created.id}`, { method: "DELETE" });
+      } catch (cleanupError) {
+        console.error(cleanupError);
+      }
+      state.knowledgeBaseId = null;
+      state.sessionId = null;
+      state.files = [];
+      await loadKnowledgeBases();
+      await switchKnowledgeBase("");
+    }
+    alert(error.message || "创建知识库失败");
+  }
 }
 
 async function renameKnowledgeBase() {
@@ -451,12 +510,18 @@ async function deleteKnowledgeBase() {
   if (!confirm("确认删除当前知识库？只会删除应用内副本和索引。")) {
     return;
   }
-  await api(`/api/knowledge-bases/${state.knowledgeBaseId}`, { method: "DELETE" });
-  state.knowledgeBaseId = null;
-  state.sessionId = null;
-  state.files = [];
-  await loadKnowledgeBases();
-  await switchKnowledgeBase("");
+  try {
+    await api(`/api/knowledge-bases/${state.knowledgeBaseId}`, { method: "DELETE" });
+    state.knowledgeBaseId = null;
+    state.sessionId = null;
+    state.files = [];
+    await loadKnowledgeBases();
+    await switchKnowledgeBase("");
+  } catch (error) {
+    alert(error.message || "删除知识库失败");
+    await loadKnowledgeBases();
+    await refreshFiles();
+  }
 }
 
 async function refreshFiles() {
