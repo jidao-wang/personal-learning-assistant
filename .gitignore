@@ -8,3 +8,4 @@ __pycache__/
 chroma_db/
 notes/
 .DS_Store
+.worktrees/
