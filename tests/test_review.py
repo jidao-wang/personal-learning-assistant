@@ -670,3 +670,25 @@ def test_submit_review_records_unanswered_question_as_zero_and_weak_point(db_pat
     assert result["total_score"] == 0.0
     assert result["answers"][0]["status"] == "unanswered"
     assert result["answers"][0]["answer_text"] == ""
+
+
+def test_normalize_raw_question_accepts_common_llm_aliases():
+    from app.review.generator import _normalize_raw_question
+    from app.review.schemas import GeneratedQuestion
+
+    normalized = _normalize_raw_question(
+        {
+            "type": "choice",
+            "description": "常用标准库里哪个用于 JSON？",
+            "options": {"A": "os", "B": "json", "C": "re", "D": "datetime"},
+            "answer": "B",
+            "explanation": "json 模块负责编解码",
+            "topic": "标准库",
+            "chunk_ids": ["c1"],
+        }
+    )
+    question = GeneratedQuestion(**normalized)
+    assert question.question_type == "choice"
+    assert question.prompt.startswith("常用标准库")
+    assert [option.label for option in question.options] == ["A", "B", "C", "D"]
+    assert question.correct_answer == "B"

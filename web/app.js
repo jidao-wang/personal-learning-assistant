@@ -52,6 +52,9 @@ const els = {
   planKbLabel: document.getElementById("plan-kb-label"),
   progressScope: document.getElementById("progress-scope"),
   progressMetrics: document.getElementById("progress-metrics"),
+  dependencyBanner: document.getElementById("dependency-banner"),
+  dependencyBannerText: document.getElementById("dependency-banner-text"),
+  dismissDependencyBanner: document.getElementById("dismiss-dependency-banner"),
 };
 
 async function api(path, options = {}) {
@@ -90,6 +93,61 @@ function setStatus(node, text) {
   }
   node.hidden = false;
   node.textContent = value;
+}
+
+
+async function withBusyButton(button, busyText, statusNode, statusText, work) {
+  if (!button) return work();
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = busyText;
+  if (statusNode) setStatus(statusNode, statusText);
+  try {
+    return await work();
+  } catch (error) {
+    const message = (error && error.message) || "操作失败";
+    if (statusNode) setStatus(statusNode, message);
+    alert(message);
+    return null;
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
+function showDependencyBanner(warnings) {
+  if (!els.dependencyBanner || !els.dependencyBannerText) return;
+  const list = Array.isArray(warnings) ? warnings.filter(Boolean) : [];
+  if (!list.length) {
+    els.dependencyBanner.hidden = true;
+    els.dependencyBannerText.textContent = "";
+    return;
+  }
+  if (window.sessionStorage.getItem("learningAssistant.dismissDependencyBanner") === list.join("|")) {
+    els.dependencyBanner.hidden = true;
+    return;
+  }
+  els.dependencyBanner.dataset.warnings = list.join("|");
+  els.dependencyBannerText.textContent =
+    "模型相关功能暂不可用：" + list.join("；") + "。知识库管理仍可使用。";
+  els.dependencyBanner.hidden = false;
+}
+
+async function loadDependencyStatus() {
+  try {
+    const health = await api("/api/health");
+    showDependencyBanner(health.warnings || []);
+    return health;
+  } catch (error) {
+    // Older servers may only expose /health
+    try {
+      const health = await api("/health");
+      showDependencyBanner(health.warnings || []);
+      return health;
+    } catch (_ignored) {
+      return null;
+    }
+  }
 }
 
 function selectedFileIds(container) {
@@ -234,6 +292,80 @@ function renderKnowledgeBases() {
 }
 
 function renderScopeBox(host, options = {}) {
+  const selectable = Boolean(options.selectable);
+  const allowUploadJump = Boolean(options.allowUploadJump);
+  host.innerHTML = "";
+  if (!state.knowledgeBaseId) {
+    host.appendChild(
+      emptyState(
+        "请先在左侧「当前知识库」中选择。若还没有库，请到「知识库」页创建并上传。",
+        "去知识库",
+        () => showView("knowledge"),
+      ),
+    );
+    return;
+  }
+  if (!state.files.length) {
+    host.appendChild(
+      emptyState(
+        "当前知识库没有文件。上传 txt/md 后才能按资料出题或制定计划。",
+        allowUploadJump ? "去知识库上传" : null,
+        allowUploadJump ? () => showView("knowledge") : null
+      )
+    );
+    return;
+  }
+  state.files.forEach((file) => {
+    const node = document.createElement("div");
+    node.className = "file-item";
+
+    const main = document.createElement("div");
+    main.className = "file-item-main";
+
+    const name = document.createElement("div");
+    name.className = "file-name";
+    const fullName = file.original_name || file.filename || file.id;
+    name.textContent = fullName;
+    name.title = fullName;
+
+    const status = document.createElement("div");
+    const statusClass = file.status === "ready" ? "status-ok" : "status-failed";
+    status.className = statusClass;
+    status.textContent = `${file.status || "ready"}${
+      file.error_message ? ` · ${file.error_message}` : ""
+    }`;
+
+    main.appendChild(name);
+    main.appendChild(status);
+    node.appendChild(main);
+
+    if (selectable) {
+      const label = document.createElement("label");
+      label.className = "file-scope-check";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.value = file.id;
+      checkbox.checked = true;
+      label.appendChild(checkbox);
+      label.appendChild(document.createTextNode("纳入范围"));
+      node.appendChild(label);
+    } else {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "danger";
+      button.textContent = "删除";
+      button.addEventListener("click", async () => {
+        await api(
+          `/api/knowledge-bases/${state.knowledgeBaseId}/files/${file.id}`,
+          { method: "DELETE" }
+        );
+        await refreshFiles();
+      });
+      node.appendChild(button);
+    }
+    host.appendChild(node);
+  });
+}) {
   const selectable = Boolean(options.selectable);
   const allowUploadJump = Boolean(options.allowUploadJump);
   host.innerHTML = "";
@@ -653,18 +785,27 @@ async function createReviewSession() {
     alert("请先选择知识库");
     return;
   }
-  const payload = {
-    knowledge_base_id: state.knowledgeBaseId,
-    file_ids: selectedFileIds(els.reviewFileScope),
-    choice_count: Number(els.reviewChoiceCount.value || 0),
-    judgment_count: Number(els.reviewJudgmentCount.value || 0),
-    short_answer_count: Number(els.reviewShortCount.value || 0),
-  };
-  const result = await api("/api/reviews", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-  await openReviewWorkspace(result.review_session_id);
+  await withBusyButton(
+    els.createReview,
+    "生成中…",
+    els.reviewResult,
+    "正在根据资料生成…",
+    async () => {
+      const payload = {
+        knowledge_base_id: state.knowledgeBaseId,
+        file_ids: selectedFileIds(els.reviewFileScope),
+        choice_count: Number(els.reviewChoiceCount.value || 0),
+        judgment_count: Number(els.reviewJudgmentCount.value || 0),
+        short_answer_count: Number(els.reviewShortCount.value || 0),
+      };
+      const result = await api("/api/reviews", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      await openReviewWorkspace(result.review_session_id);
+      setStatus(els.reviewResult, "复习题已生成，可在作答区作答。");
+    },
+  );
 }
 
 async function saveReviewDraft() {
@@ -704,26 +845,34 @@ async function generatePlan() {
     alert("请先选择知识库");
     return;
   }
-  const daily = els.planDailyMinutes.value;
-  const payload = {
-    knowledge_base_id: state.knowledgeBaseId,
-    file_ids: selectedFileIds(els.planFileScope),
-    goal: els.planGoal.value.trim(),
-    deadline: els.planDeadline.value.trim(),
-    daily_minutes: daily === "" ? null : Number(daily),
-  };
-  const result = await api("/api/plans", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-  if (result.status === "needs_input") {
-    setStatus(els.planStatus, `请补充：${(result.missing_fields || []).join("、")}`);
-    return;
-  }
-  state.planId = result.plan_id;
-  els.planContent.value = result.content || "";
-  setStatus(els.planStatus, `计划已生成：${result.plan_id}`);
-  showView("plan");
+  await withBusyButton(
+    els.generatePlan,
+    "生成中…",
+    els.planStatus,
+    "正在根据资料生成…",
+    async () => {
+      const daily = els.planDailyMinutes.value;
+      const payload = {
+        knowledge_base_id: state.knowledgeBaseId,
+        file_ids: selectedFileIds(els.planFileScope),
+        goal: els.planGoal.value.trim(),
+        deadline: els.planDeadline.value.trim(),
+        daily_minutes: daily === "" ? null : Number(daily),
+      };
+      const result = await api("/api/plans", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      if (result.status === "needs_input") {
+        setStatus(els.planStatus, `请补充：${(result.missing_fields || []).join("、")}`);
+        return;
+      }
+      state.planId = result.plan_id;
+      els.planContent.value = result.content || "";
+      setStatus(els.planStatus, `计划已生成：${result.plan_id}`);
+      showView("plan");
+    },
+  );
 }
 
 async function savePlan() {
@@ -804,6 +953,19 @@ function bindEvents() {
   els.submitReview.addEventListener("click", () => submitReview());
   els.generatePlan.addEventListener("click", () => generatePlan());
   els.savePlan.addEventListener("click", () => savePlan());
+  if (els.dismissDependencyBanner) {
+    els.dismissDependencyBanner.addEventListener("click", () => {
+      if (!els.dependencyBanner || !els.dependencyBannerText) return;
+      window.sessionStorage.setItem(
+        "learningAssistant.dismissDependencyBanner",
+        (els.dependencyBannerText.textContent || "").replace(/^模型相关功能暂不可用：/, "").replace(/。知识库管理仍可使用。$/, ""),
+      );
+      // Store raw warnings joined if we kept them on dataset
+      const raw = els.dependencyBanner.dataset.warnings || "";
+      window.sessionStorage.setItem("learningAssistant.dismissDependencyBanner", raw);
+      els.dependencyBanner.hidden = true;
+    });
+  }
 }
 
 async function init() {
@@ -817,6 +979,7 @@ async function init() {
     ? preferredId
     : (state.knowledgeBases[0] && state.knowledgeBases[0].id) || "";
   await switchKnowledgeBase(initialId);
+  await loadDependencyStatus();
   renderProgress({
     review_count: 0,
     accuracy: 0,

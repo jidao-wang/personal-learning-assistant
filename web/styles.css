@@ -461,3 +461,67 @@ button.secondary { background: #475569; }
     min-height: 70vh;
   }
 }
+
+
+.dependency-banner {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid #f6e05e;
+  background: #fffbeb;
+  color: #744210;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.dependency-banner[hidden] {
+  display: none !important;
+}
+
+.dependency-banner .secondary {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.scope-box {
+  max-height: 220px;
+  overflow: auto;
+  align-content: start;
+}
+
+.file-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+}
+
+.file-item-main {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
+}
+
+.file-scope-check {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.file-item > .danger {
+  justify-self: end;
+}

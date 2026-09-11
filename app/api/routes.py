@@ -113,8 +113,31 @@ def _as_ingest_dict(result: FileIngestResult | dict) -> dict:
 
 
 @router.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "OK"}
+@router.get("/api/health")
+def health(request: Request) -> dict:
+    """Liveness plus lightweight dependency/config signals for the UI banner."""
+    runtime = _runtime(request)
+    openai_installed = False
+    try:
+        import openai  # noqa: F401
+
+        openai_installed = True
+    except ImportError:
+        openai_installed = False
+
+    api_key_configured = bool(str(getattr(runtime.settings, "api_key", "") or "").strip())
+    warnings: list[str] = []
+    if not api_key_configured:
+        warnings.append("未配置 DASHSCOPE_API_KEY（请在 .env 中填写）")
+    if not openai_installed:
+        warnings.append("未安装 openai 包（请执行：pip install openai）")
+    return {
+        "status": "OK",
+        "openai_installed": openai_installed,
+        "api_key_configured": api_key_configured,
+        "llm_ready": openai_installed and api_key_configured,
+        "warnings": warnings,
+    }
 
 
 @router.get("/api/knowledge-bases")
@@ -299,15 +322,18 @@ def create_review(payload: ReviewCreateRequest, request: Request):
         )
     except ValueError as exc:
         raise AppError(str(exc)) from exc
-    result = generate_review(
-        payload.knowledge_base_id,
-        payload.file_ids,
-        counts,
-        runtime.settings,
-        _llm_client(runtime),
-        db_path=runtime.db_path,
-        vector_store=runtime.vector_store,
-    )
+    try:
+        result = generate_review(
+            payload.knowledge_base_id,
+            payload.file_ids,
+            counts,
+            runtime.settings,
+            _llm_client(runtime),
+            db_path=runtime.db_path,
+            vector_store=runtime.vector_store,
+        )
+    except ValueError as exc:
+        raise AppError(str(exc)) from exc
     return {
         **result,
         "questions": [_public_question(question) for question in result.get("questions", [])],
@@ -352,15 +378,18 @@ def create_learning_plan(payload: PlanCreateRequest, request: Request):
     missing = missing_plan_fields(plan_input)
     if missing:
         return {"status": "needs_input", "missing_fields": missing}
-    return generate_plan(
-        payload.knowledge_base_id,
-        payload.file_ids,
-        plan_input,
-        runtime.settings,
-        _llm_client(runtime),
-        db_path=runtime.db_path,
-        vector_store=runtime.vector_store,
-    )
+    try:
+        return generate_plan(
+            payload.knowledge_base_id,
+            payload.file_ids,
+            plan_input,
+            runtime.settings,
+            _llm_client(runtime),
+            db_path=runtime.db_path,
+            vector_store=runtime.vector_store,
+        )
+    except ValueError as exc:
+        raise AppError(str(exc)) from exc
 
 
 @router.get("/api/plans/{plan_id}")
