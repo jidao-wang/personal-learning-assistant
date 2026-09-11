@@ -9,3 +9,8 @@ chroma_db/
 notes/
 .DS_Store
 .worktrees/
+
+data/*
+!data/.gitkeep
+*.log
+

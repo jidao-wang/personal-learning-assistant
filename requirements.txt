@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+python-dotenv
+python-multipart
+pydantic
+openai
+langgraph
+langchain-chroma
+chromadb
+dashscope
+pytest
+httpx
