@@ -1,7 +1,10 @@
 .idea/
+.vscode/
 .venv/
 venv/
 .env
+.env.local
+.env.*.local
 __pycache__/
 *.py[cod]
 *.sqlite3
@@ -9,8 +12,12 @@ chroma_db/
 notes/
 .DS_Store
 .worktrees/
+*.log
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
 
+# runtime data (uploads, sqlite, chroma, logs, local samples)
 data/*
 !data/.gitkeep
-*.log
-

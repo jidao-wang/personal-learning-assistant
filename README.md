@@ -45,3 +45,15 @@ FastAPI → LangGraph 单主 Agent → chat/qa/review/plan/statistics；SQLite �
 pytest -q
 python eval/run_eval.py
 ```
+
+## 推送到 GitHub
+
+本仓库可安全公开代码。推送前请确认：
+
+- 只会上传代码、测试、文档和 .env.example
+- **不会**上传 .env（含 API Key）、data/ 运行时数据、sqlite、Chroma、上传文件、日志
+- 别人 clone 后只能看到代码，需自行安装依赖并配置自己的 .env 才能运行
+
+`powershell
+git push -u origin codex/personal-learning-assistant-mvp
+`
