@@ -243,7 +243,7 @@ def test_llm_client_can_initialize_without_key_but_fails_before_call():
         client.chat([])
 
 
-def test_llm_client_reports_missing_openai_only_when_calling():
+def test_llm_client_reports_missing_openai_only_when_calling(monkeypatch):
     from app.core.llm_client import LLMClient
 
     settings = type(
@@ -259,6 +259,15 @@ def test_llm_client_reports_missing_openai_only_when_calling():
     )()
     client = LLMClient(settings)
     assert client.client is None
+
+    real_import = __import__
+
+    def missing_openai(name, *args, **kwargs):
+        if name == "openai":
+            raise ImportError("simulated missing openai")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", missing_openai)
 
     with pytest.raises(ConfigurationError, match="openai"):
         client.chat([])
