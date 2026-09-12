@@ -10,7 +10,12 @@
 
 ## 启动
 
+项目根目录是：
+
+`C:\ai agent\个人学习资料问答与复习助手`
+
 ```powershell
+cd "C:\ai agent\个人学习资料问答与复习助手"
 py -3.10 -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
